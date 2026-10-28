@@ -13,6 +13,9 @@ pub mod run;
 pub mod runner;
 pub mod scripted;
 pub mod session;
+pub mod strategy;
+pub mod strategy_iosxe;
+pub mod strategy_nxos;
 pub mod tftp;
 pub mod transfer;
 pub mod uptime;
@@ -37,6 +40,7 @@ pub use run::{
 pub use runner::{device_kind, RunFiles, Runner};
 pub use scripted::ScriptedConsole;
 pub use session::{Console, Session, SessionError};
+pub use strategy::{strategy_for, FamilyStrategy};
 pub use tftp::{
     block_count, data_packet, error_packet, negotiated_blksize, oack_packet, parse_ack, parse_rrq,
     serves, wire_block, ReadRequest,
