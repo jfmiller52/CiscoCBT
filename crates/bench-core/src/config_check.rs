@@ -186,7 +186,7 @@ fn expand_range_item(item: &str) -> Option<Vec<String>> {
 /// Whether `line` is satisfied by `section` (normalized running lines).
 fn is_present(line: &str, section: &[&str]) -> bool {
     match line.strip_prefix("no ") {
-        Some(command) => section.contains(&line) || !has_command(command, section),
+        Some(command) => section.contains(&line) || !command_remains(command, section),
         None => has_command(line, section),
     }
 }
@@ -198,8 +198,21 @@ fn has_command(command: &str, section: &[&str]) -> bool {
     }
 }
 
+/// Whether `command` is still configured, with or without further arguments.
+fn command_remains(command: &str, section: &[&str]) -> bool {
+    has_command(command, section)
+        || section.iter().any(|l| {
+            l.strip_prefix(command)
+                .is_some_and(|rest| rest.starts_with(' '))
+        })
+}
+
 /// The words up to and including the first `password`/`secret` keyword.
+/// `description` lines are free text, so they have no secret prefix.
 fn secret_prefix(line: &str) -> Option<&str> {
+    if line.split(' ').next() == Some("description") {
+        return None;
+    }
     let mut end = 0;
     for word in line.split(' ') {
         end += word.len();
@@ -452,5 +465,30 @@ Current configuration : 12 bytes
 end
 ";
         assert!(missing(file, "").is_empty());
+    }
+
+    #[test]
+    fn no_ip_address_is_missing_when_an_address_remains() {
+        let file = "interface Gi1/0/1\n no ip address\n";
+        let with_address = "interface GigabitEthernet1/0/1\n ip address 10.0.0.1 255.255.255.0\n";
+        assert_eq!(missing(file, with_address), vec![" no ip address".to_string()]);
+        let without = "interface GigabitEthernet1/0/1\n ip addresses-other 1\n switchport mode access\n";
+        assert!(missing(file, without).is_empty());
+        let shut = "interface GigabitEthernet1/0/1\n switchport mode access\n";
+        assert!(missing("interface Gi1/0/1\n no shutdown\n", shut).is_empty());
+    }
+
+    #[test]
+    fn descriptions_mentioning_password_compare_exactly() {
+        let running = "interface GigabitEthernet1/0/1\n description password reset kiosk\n";
+        assert!(missing("interface Gi1/0/1\n description password reset kiosk\n", running).is_empty());
+        assert_eq!(
+            missing("interface Gi1/0/1\n description password\n", running),
+            vec![" description password".to_string()]
+        );
+        assert_eq!(
+            missing("interface Gi1/0/1\n description secret lab\n", running),
+            vec![" description secret lab".to_string()]
+        );
     }
 }
