@@ -54,7 +54,7 @@ fn open_window(
             Config::new()
                 .with_window(
                     WindowBuilder::new()
-                        .with_title("IOS-XE Bench")
+                        .with_title("Cisco CBT App")
                         .with_inner_size(LogicalSize::new(1180.0, 780.0))
                         .with_min_inner_size(LogicalSize::new(900.0, 600.0)),
                 )

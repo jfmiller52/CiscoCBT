@@ -1,5 +1,5 @@
 [application]
-name = "IOS-XE Bench"
+name = "Cisco CBT App"
 
 [bundle]
-identifier = "com.ciscoconfig.bench"
+identifier = "com.ciscoconfig.cbt"

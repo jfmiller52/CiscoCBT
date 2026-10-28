@@ -517,7 +517,7 @@ mod tests {
         let exe = if cfg!(windows) {
             r"C:\Program Files\bench-app.exe"
         } else {
-            "/Applications/Bench App.app/Contents/MacOS/bench"
+            "/Applications/Cisco CBT App.app/Contents/MacOS/bench"
         };
         let job = if cfg!(windows) {
             r"C:\bench-job"
@@ -528,7 +528,7 @@ mod tests {
         let expected = if cfg!(windows) {
             r#""C:\Program Files\bench-app.exe" --tftp-serve 192.0.2.1:69 "C:\bench-job""#
         } else {
-            "'/Applications/Bench App.app/Contents/MacOS/bench' --tftp-serve 192.0.2.1:69 '/tmp/bench-job'"
+            "'/Applications/Cisco CBT App.app/Contents/MacOS/bench' --tftp-serve 192.0.2.1:69 '/tmp/bench-job'"
         };
         assert_eq!(command, expected);
     }

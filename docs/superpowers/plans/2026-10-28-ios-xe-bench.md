@@ -1270,7 +1270,7 @@ Expected: FAIL to compile
 - `KeepAwake` runs `caffeinate -dims -w <pid>` on macOS and calls `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` on Windows through `windows-sys`.
 - The worker thread owns the `Runner` and a `KeepAwake` for the run. It reads the configuration file into `RunFiles`. It calls `advance` until the phase blocks, publishing a `ViewState` after each call. Before `CopyImage` it adds the server address and starts `serve` on `192.0.2.1:69` in its own thread; after `ImageOnFlash`, or a stop, it stops the server and removes the address. When the phase becomes `WaitBurnIn`, the deadline is now plus the entered hours. Until then it handles `CheckPort` and publishes the remaining time once a minute, then calls `finish_wait`. `CheckPort` runs whenever `port_walk_available` allows it; `current_port` is the first port that has not passed. `Export` puts `export_text(runner.export_input())` into the next `ViewState`.
 - `main.rs` fills `serial_devices` and `ethernet_ports`, opens the window from Task 12, and passes its commands to `worker::spawn`.
-- `Dioxus.toml` names the app `IOS-XE Bench` with bundle identifier `com.ciscoconfig.bench` so `dx bundle` can produce a macOS and a Windows package.
+- `Dioxus.toml` names the app `Cisco CBT App` with bundle identifier `com.ciscoconfig.cbt` so `dx bundle` can produce a macOS and a Windows package.
 
 - [ ] **Step 4: Run tests and build**
 
