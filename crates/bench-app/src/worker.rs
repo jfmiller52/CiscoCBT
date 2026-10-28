@@ -407,9 +407,11 @@ mod tests {
         RunOptions {
             serial_device: serial_device.into(),
             config_path: config_path.into(),
+            family: bench_core::DeviceFamily::IosXe,
             firmware: None,
             burn_in_hours: None,
             port_testing: false,
+            capwap: None,
         }
     }
 
@@ -491,9 +493,11 @@ mod tests {
         let options = RunOptions {
             serial_device: "/dev/cu.bench-test".into(),
             config_path: "/bench/closet-access.cfg".into(),
+            family: bench_core::DeviceFamily::IosXe,
             firmware: None,
             burn_in_hours: None,
             port_testing: false,
+            capwap: None,
         };
         let files = RunFiles {
             config_name: "closet-access.cfg".into(),

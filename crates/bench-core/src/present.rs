@@ -36,6 +36,7 @@ mod tests {
             firmware: CheckStatus::NotChosen,
             burn_in: CheckStatus::NotChosen,
             ports: CheckStatus::NotChosen,
+            capwap: CheckStatus::NotChosen,
         };
         assert_eq!(release_heading(&record), "Ready to release");
         let secrets = FactorySecrets {
@@ -56,6 +57,7 @@ mod tests {
             firmware: CheckStatus::NotChosen,
             burn_in: CheckStatus::NotFinished,
             ports: CheckStatus::NotChosen,
+            capwap: CheckStatus::NotChosen,
         };
         assert_eq!(release_heading(&record), "Not ready to release");
         let secrets = FactorySecrets {

@@ -91,12 +91,14 @@ mod tests {
         RunOptions {
             serial_device: "tty".into(),
             config_path: "cfg".into(),
+            family: crate::DeviceFamily::IosXe,
             firmware: Some(FirmwareChoice {
                 image_path: "img".into(),
                 local_ethernet: "eth0".into(),
             }),
             burn_in_hours: Some(24),
             port_testing: false,
+            capwap: None,
         }
     }
 
@@ -104,9 +106,11 @@ mod tests {
         RunOptions {
             serial_device: "tty".into(),
             config_path: "cfg".into(),
+            family: crate::DeviceFamily::IosXe,
             firmware: None,
             burn_in_hours: None,
             port_testing: false,
+            capwap: None,
         }
     }
 

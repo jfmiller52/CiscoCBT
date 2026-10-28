@@ -66,9 +66,11 @@ impl StartForm {
         Ok(RunOptions {
             serial_device: self.serial_device.clone(),
             config_path: self.config_path.clone(),
+            family: crate::DeviceFamily::default(),
             firmware,
             burn_in_hours,
             port_testing: self.port_testing,
+            capwap: None,
         })
     }
 }

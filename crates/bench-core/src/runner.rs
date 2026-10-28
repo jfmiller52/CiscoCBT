@@ -91,6 +91,7 @@ impl<C: Console> Runner<C> {
             firmware: chosen(options.firmware.is_some()),
             burn_in: chosen(options.burn_in_hours.is_some()),
             ports: chosen(options.port_testing),
+            capwap: chosen(options.capwap.is_some()),
         };
         Self {
             session,
@@ -679,12 +680,14 @@ mod tests {
         RunOptions {
             serial_device: "/dev/cu.usbserial-1420".into(),
             config_path: "/bench/closet-access.cfg".into(),
+            family: crate::DeviceFamily::IosXe,
             firmware: image.map(|image| FirmwareChoice {
                 image_path: format!("/bench/{image}"),
                 local_ethernet: "en5".into(),
             }),
             burn_in_hours,
             port_testing,
+            capwap: None,
         }
     }
 

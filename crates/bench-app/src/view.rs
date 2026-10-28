@@ -40,6 +40,7 @@ impl ViewState {
                 firmware: CheckStatus::NotChosen,
                 burn_in: CheckStatus::NotChosen,
                 ports: CheckStatus::NotChosen,
+                capwap: CheckStatus::NotChosen,
             },
             reminder: None,
             tftp_port: None,
