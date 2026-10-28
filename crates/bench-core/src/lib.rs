@@ -1,4 +1,5 @@
 pub mod config_check;
+pub mod export;
 pub mod firmware;
 pub mod login;
 pub mod ports;
@@ -6,6 +7,7 @@ pub mod run;
 pub mod uptime;
 
 pub use config_check::{canonical_interface_name, missing_commands};
+pub use export::{chassis_serial, export_text, ExportInput};
 pub use firmware::{firmware_check, version_token, FirmwareCheck};
 pub use login::{
     decode_type7, login_after_apply, FactoryLogin, FactorySecrets, LoginAction, LoginEvent,
