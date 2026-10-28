@@ -1,3 +1,4 @@
+pub mod capwap;
 pub mod config_check;
 pub mod family;
 pub mod console_link;
@@ -16,6 +17,7 @@ pub mod tftp;
 pub mod transfer;
 pub mod uptime;
 
+pub use capwap::{capwap_apply_command, capwap_failure_detail, capwap_passed};
 pub use config_check::{canonical_interface_name, missing_commands};
 pub use console_link::{cisco_console, SerialSettings};
 pub use export::{chassis_serial, export_text, ExportInput};
