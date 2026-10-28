@@ -26,6 +26,8 @@ const NO_PORT_TESTING: &str = "Port testing was not chosen for this run.";
 const NO_PORT_WALK: &str = "Ports can be checked only after the configuration has passed validation, and not once the run has stopped.";
 const SWITCH_PORT_DOWN: &str = "The port is not connected in show interface status.";
 const ROUTER_PORT_DOWN: &str = "The interface or its line protocol is not up.";
+const NO_PORTS: &str = "No physical ports were found to test.";
+const NO_PORTS_ROW: &str = "No physical ports";
 const NO_SERIAL: &str = "Not reported";
 
 /// The files chosen for the run. `image_name` is the bare file name the
@@ -200,6 +202,13 @@ impl<C: Console> Runner<C> {
         } else {
             None
         };
+        // The export prints no Ports section for an empty list.
+        let ports = match &self.record.ports {
+            CheckStatus::Failed { .. } if self.ports.is_empty() => {
+                vec![(NO_PORTS_ROW.to_string(), self.record.ports.clone())]
+            }
+            _ => self.ports.clone(),
+        };
         ExportInput {
             hostname: self.session.hostname().to_string(),
             serial: self.serial.clone().unwrap_or_else(|| NO_SERIAL.into()),
@@ -211,7 +220,7 @@ impl<C: Console> Runner<C> {
             burn_in_hours: self.options.burn_in_hours,
             uptime_line: self.uptime_line.clone(),
             burn_in: self.record.burn_in.clone(),
-            ports: self.ports.clone(),
+            ports,
         }
     }
 
@@ -266,6 +275,11 @@ impl<C: Console> Runner<C> {
                 .into_iter()
                 .map(|name| (name, CheckStatus::NotFinished))
                 .collect();
+            if self.ports.is_empty() {
+                self.record.ports = CheckStatus::Failed {
+                    detail: NO_PORTS.into(),
+                };
+            }
         }
         if self.options.firmware.is_some() {
             self.tftp_port = first_physical(&names);
@@ -432,8 +446,8 @@ fn interface_names(brief: &str) -> Vec<String> {
         .collect()
 }
 
-/// Passed when every port passed, failed when any port failed, otherwise not
-/// finished.
+/// Passed when there are ports and every one passed, failed when any port
+/// failed, otherwise not finished.
 fn ports_status(ports: &[(String, CheckStatus)]) -> CheckStatus {
     let failed: Vec<&str> = ports
         .iter()
@@ -444,9 +458,10 @@ fn ports_status(ports: &[(String, CheckStatus)]) -> CheckStatus {
         CheckStatus::Failed {
             detail: failed.join("\n"),
         }
-    } else if ports
-        .iter()
-        .all(|(_, status)| *status == CheckStatus::Passed)
+    } else if !ports.is_empty()
+        && ports
+            .iter()
+            .all(|(_, status)| *status == CheckStatus::Passed)
     {
         CheckStatus::Passed
     } else {
@@ -1131,6 +1146,28 @@ mod tests {
                 (second.to_string(), CheckStatus::Passed),
             ]
         );
+    }
+
+    #[test]
+    fn port_testing_without_physical_ports_fails_the_ports_and_the_run_continues() {
+        let runner = done_runner(SWITCH_VERSION, &["Vlan1", "Loopback0"], vec![]);
+        let failed = CheckStatus::Failed {
+            detail: "No physical ports were found to test.".into(),
+        };
+        assert_eq!(runner.record().ports, failed);
+        assert_eq!(runner.record().configuration, CheckStatus::Passed);
+        assert!(!crate::run::ready_to_release(runner.record()));
+        assert!(runner.ports().is_empty());
+        let input = runner.export_input();
+        assert_eq!(input.ports, vec![("No physical ports".to_string(), failed)]);
+        assert!(export_text(&input).contains(
+            "\nPorts\nNo physical ports: Failed\n    No physical ports were found to test.\n"
+        ));
+    }
+
+    #[test]
+    fn no_ports_is_not_finished_rather_than_passed() {
+        assert_eq!(ports_status(&[]), CheckStatus::NotFinished);
     }
 
     #[test]
