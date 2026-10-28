@@ -122,7 +122,7 @@ pub enum NextLogin {
     Stop { lines: Vec<String> },
 }
 
-const TYPE7_KEY: &[u8] = b"dsfd;kfoA,.iyewrkldJKDHSUBsgvca69834ncx";
+const TYPE7_KEY: &[u8] = b"dsfd;kfoA,.iyewrkldJKDHSUBsgvca69834ncxv9873254k;fg87";
 /// IOS only produces type 7 seeds 0 through 15.
 const TYPE7_MAX_INDEX: usize = 15;
 
@@ -141,6 +141,9 @@ pub fn decode_type7(encoded: &str) -> Option<String> {
     }
     let mut decoded = Vec::with_capacity(body.len() / 2);
     for (i, pair) in body.as_bytes().chunks(2).enumerate() {
+        if !pair.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
         let byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
         let plain = byte ^ TYPE7_KEY[(index + i) % TYPE7_KEY.len()];
         if !(0x20..=0x7e).contains(&plain) {
@@ -181,7 +184,7 @@ fn split_token(s: &str) -> Option<(&str, &str)> {
 /// Reads `[TYPE] VALUE` and returns the typable password, if any.
 fn typable_value(rest: &str) -> Option<String> {
     let (kind, value) = match split_token(rest) {
-        Some((token, after)) if matches!(token, "0" | "5" | "7" | "8" | "9") => {
+        Some((token, after)) if matches!(token, "0" | "4" | "5" | "6" | "7" | "8" | "9") => {
             (token, after.trim())
         }
         _ => ("0", rest.trim()),
@@ -594,6 +597,44 @@ mod tests {
         match login_after_apply("hostname closet-2-sw1\n", &factory) {
             NextLogin::Factory(secrets) => assert_eq!(secrets.password, "Passw0rd%"),
             other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn type7_decodes_with_other_seeds() {
+        assert_eq!(decode_type7("0822455D0A16").as_deref(), Some("cisco"));
+    }
+
+    #[test]
+    fn type7_key_is_the_full_53_character_table() {
+        assert_eq!(TYPE7_KEY.len(), 53);
+    }
+
+    #[test]
+    fn type7_long_password_round_trips_past_the_39th_key_byte() {
+        let plain = "A-long-password-that-runs-well-past-the-end-of-the-old-table-1234";
+        let seed = 15;
+        let mut encoded = format!("{seed:02}");
+        for (i, byte) in plain.bytes().enumerate() {
+            encoded.push_str(&format!("{:02X}", byte ^ TYPE7_KEY[(seed + i) % 53]));
+        }
+        assert!(seed + plain.len() > 53);
+        assert_eq!(decode_type7(&encoded).as_deref(), Some(plain));
+    }
+
+    #[test]
+    fn type7_pair_with_a_plus_sign_is_malformed() {
+        assert_eq!(decode_type7("02050D48+5"), None);
+        assert_eq!(decode_type7("02+5"), None);
+    }
+
+    #[test]
+    fn type_4_and_6_secrets_are_not_typable() {
+        for file in ["enable secret 4 xyz\n", "enable secret 6 xyz\n"] {
+            assert!(matches!(
+                login_after_apply(file, &factory()),
+                NextLogin::Stop { .. }
+            ));
         }
     }
 
