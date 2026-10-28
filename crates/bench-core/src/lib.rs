@@ -8,6 +8,8 @@ pub mod phase;
 pub mod ports;
 pub mod present;
 pub mod run;
+pub mod scripted;
+pub mod session;
 pub mod tftp;
 pub mod transfer;
 pub mod uptime;
@@ -27,6 +29,8 @@ pub use present::{release_heading, reminder_line, status_label};
 pub use run::{
     ready_to_release, validate_burn_in_hours, CheckStatus, FirmwareChoice, RunOptions, RunRecord,
 };
+pub use scripted::ScriptedConsole;
+pub use session::{Console, Session, SessionError};
 pub use tftp::{
     block_count, data_packet, error_packet, negotiated_blksize, oack_packet, parse_ack, parse_rrq,
     serves, wire_block, ReadRequest,
