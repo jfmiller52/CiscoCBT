@@ -168,22 +168,36 @@ struct Tftp {
     server: nic::ImageServer,
 }
 
+/// Reads the configuration file for a switch. An access point has no
+/// configuration file, so the body stays empty and nothing is read.
+fn load_run_files(options: &RunOptions) -> Result<RunFiles, String> {
+    let image_name = options
+        .firmware
+        .as_ref()
+        .map(|firmware| file_name(&firmware.image_path));
+    if options.family == bench_core::DeviceFamily::AccessPoint {
+        return Ok(RunFiles {
+            config_name: String::new(),
+            config_body: String::new(),
+            image_name,
+        });
+    }
+    let config_body = fs::read_to_string(&options.config_path).map_err(|err| {
+        format!(
+            "The configuration file {} could not be read: {err}",
+            options.config_path
+        )
+    })?;
+    Ok(RunFiles {
+        config_name: file_name(&options.config_path),
+        config_body,
+        image_name,
+    })
+}
+
 impl Run {
     fn open(options: RunOptions, window: &Rc<Window>) -> Result<Self, String> {
-        let config_body = fs::read_to_string(&options.config_path).map_err(|err| {
-            format!(
-                "The configuration file {} could not be read: {err}",
-                options.config_path
-            )
-        })?;
-        let files = RunFiles {
-            config_name: file_name(&options.config_path),
-            config_body,
-            image_name: options
-                .firmware
-                .as_ref()
-                .map(|firmware| file_name(&firmware.image_path)),
-        };
+        let files = load_run_files(&options)?;
         let window = Rc::clone(window);
         let echo = Box::new(move |text: &str| window.echo(text));
         let console = SerialConsole::open(&options.serial_device, echo).map_err(|err| {
@@ -424,6 +438,30 @@ mod tests {
         });
         commands.send(command).unwrap();
         views.recv_timeout(Duration::from_secs(10)).unwrap()
+    }
+
+    #[test]
+    fn an_access_point_run_does_not_read_a_configuration_file() {
+        let options = RunOptions {
+            serial_device: "/dev/cu.bench-test".into(),
+            config_path: "/no/such/ap.cfg".into(),
+            family: bench_core::DeviceFamily::AccessPoint,
+            firmware: Some(bench_core::FirmwareChoice {
+                image_path: "/images/ap.bin".into(),
+                local_ethernet: "en0".into(),
+            }),
+            burn_in_hours: None,
+            port_testing: true,
+            capwap: Some(bench_core::CapwapChoice {
+                ip: "10.0.0.1".into(),
+                mask: "255.255.255.0".into(),
+                gateway: "10.0.0.254".into(),
+            }),
+        };
+        let files = load_run_files(&options).unwrap();
+        assert!(files.config_name.is_empty());
+        assert!(files.config_body.is_empty());
+        assert_eq!(files.image_name.as_deref(), Some("ap.bin"));
     }
 
     #[test]

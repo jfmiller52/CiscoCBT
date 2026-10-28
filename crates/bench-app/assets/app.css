@@ -333,6 +333,17 @@ select {
   font-size: 12px;
 }
 
+.text-input {
+  width: 100%;
+  max-width: 420px;
+  background: var(--chrome);
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-strong);
+}
+
 .switch {
   appearance: none;
   -webkit-appearance: none;

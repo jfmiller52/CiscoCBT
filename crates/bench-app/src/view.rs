@@ -137,4 +137,23 @@ mod tests {
         state.phase = Some(Phase::Stopped);
         assert_eq!(screen_for(&state), Screen::Record);
     }
+
+    #[test]
+    fn an_access_point_never_shows_the_port_walk() {
+        use bench_core::DeviceFamily;
+
+        for phase in [
+            Phase::CleanReboot,
+            Phase::WaitBurnIn,
+            Phase::ReadUptime,
+            Phase::Done,
+            Phase::ApplyCapwap,
+            Phase::ValidateCapwap,
+        ] {
+            let mut state = walking(phase);
+            state.form.family = DeviceFamily::AccessPoint;
+            state.form.port_testing = true;
+            assert_eq!(screen_for(&state), Screen::Record, "{phase:?}");
+        }
+    }
 }

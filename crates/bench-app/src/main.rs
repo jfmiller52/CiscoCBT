@@ -10,7 +10,9 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bench_core::{release_heading, reminder_line, status_label, CheckStatus};
+use bench_core::{
+    export_available, release_heading, reminder_line, status_label, CheckStatus, DeviceFamily,
+};
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
@@ -213,10 +215,12 @@ fn Sidebar(state: Signal<ViewState>) -> Element {
                     value: form.serial_device.clone(),
                     full: form.serial_device.clone(),
                 }
-                Fact {
-                    label: "Configuration file",
-                    value: file_name(&form.config_path),
-                    full: form.config_path.clone(),
+                if form.family != DeviceFamily::AccessPoint {
+                    Fact {
+                        label: "Configuration file",
+                        value: file_name(&form.config_path),
+                        full: form.config_path.clone(),
+                    }
                 }
                 if form.firmware_on {
                     Fact {
@@ -248,6 +252,7 @@ fn StartFormScreen(mut state: Signal<ViewState>) -> Element {
     let mut error = use_signal(|| None::<&'static str>);
     let view = state.read();
     let form = &view.form;
+    let access_point = form.family == DeviceFamily::AccessPoint;
     let hours = if form.hours == 0 {
         String::new()
     } else {
@@ -256,6 +261,46 @@ fn StartFormScreen(mut state: Signal<ViewState>) -> Element {
     rsx! {
         h1 { class: "screen-title", "Start a run" }
         div { class: "form",
+            section { class: "card",
+                label { class: "field-label", r#for: "device-family", "Device family" }
+                select {
+                    id: "device-family",
+                    class: "select",
+                    onchange: move |event: FormEvent| {
+                        let Some(family) = device_family(&event.value()) else {
+                            return;
+                        };
+                        let changed = {
+                            let mut view = state.write();
+                            if view.form.family == family {
+                                false
+                            } else {
+                                view.form.family = family;
+                                view.form.on_family_changed();
+                                true
+                            }
+                        };
+                        if changed {
+                            error.set(None);
+                        }
+                    },
+                    option {
+                        value: "IOS-XE",
+                        selected: form.family == DeviceFamily::IosXe,
+                        "IOS-XE"
+                    }
+                    option {
+                        value: "NX-OS",
+                        selected: form.family == DeviceFamily::Nxos,
+                        "NX-OS"
+                    }
+                    option {
+                        value: "Access point",
+                        selected: form.family == DeviceFamily::AccessPoint,
+                        "Access point"
+                    }
+                }
+            }
             section { class: "card",
                 label { class: "field-label", r#for: "serial-device", "Serial device" }
                 DeviceSelect {
@@ -266,12 +311,14 @@ fn StartFormScreen(mut state: Signal<ViewState>) -> Element {
                     onpick: move |name| state.write().form.serial_device = name,
                 }
             }
-            section { class: "card",
-                FileField {
-                    id: "config-file",
-                    label: "Configuration file",
-                    path: form.config_path.clone(),
-                    onpick: move |path| state.write().form.config_path = path,
+            if !access_point {
+                section { class: "card",
+                    FileField {
+                        id: "config-file",
+                        label: "Configuration file",
+                        path: form.config_path.clone(),
+                        onpick: move |path| state.write().form.config_path = path,
+                    }
                 }
             }
             section { class: "card",
@@ -302,52 +349,86 @@ fn StartFormScreen(mut state: Signal<ViewState>) -> Element {
                     }
                 }
             }
-            section { class: "card",
-                Toggle {
-                    id: "burn-in-on",
-                    label: "Burn-in",
-                    checked: form.burn_in_on,
-                    ontoggle: move |on| state.write().form.burn_in_on = on,
-                }
-                if form.burn_in_on {
-                    div { class: "card-body",
-                        label { class: "hours-label", r#for: "burn-in-hours", "Length, in whole hours" }
-                        div { class: "stepper",
-                            button {
-                                class: "button step",
-                                aria_label: "One hour less",
-                                onclick: move |_| state.write().form.step_hours(-1),
-                                "−"
+            if !access_point {
+                section { class: "card",
+                    Toggle {
+                        id: "burn-in-on",
+                        label: "Burn-in",
+                        checked: form.burn_in_on,
+                        ontoggle: move |on| state.write().form.burn_in_on = on,
+                    }
+                    if form.burn_in_on {
+                        div { class: "card-body",
+                            label { class: "hours-label", r#for: "burn-in-hours", "Length, in whole hours" }
+                            div { class: "stepper",
+                                button {
+                                    class: "button step",
+                                    aria_label: "One hour less",
+                                    onclick: move |_| state.write().form.step_hours(-1),
+                                    "−"
+                                }
+                                input {
+                                    id: "burn-in-hours",
+                                    class: "hours-input mono",
+                                    r#type: "number",
+                                    min: "1",
+                                    step: "1",
+                                    inputmode: "numeric",
+                                    value: "{hours}",
+                                    oninput: move |event: FormEvent| {
+                                        state.write().form.hours = event.value().trim().parse().unwrap_or(0);
+                                    },
+                                }
+                                button {
+                                    class: "button step",
+                                    aria_label: "One hour more",
+                                    onclick: move |_| state.write().form.step_hours(1),
+                                    "+"
+                                }
+                                span { "hours" }
                             }
-                            input {
-                                id: "burn-in-hours",
-                                class: "hours-input mono",
-                                r#type: "number",
-                                min: "1",
-                                step: "1",
-                                inputmode: "numeric",
-                                value: "{hours}",
-                                oninput: move |event: FormEvent| {
-                                    state.write().form.hours = event.value().trim().parse().unwrap_or(0);
-                                },
-                            }
-                            button {
-                                class: "button step",
-                                aria_label: "One hour more",
-                                onclick: move |_| state.write().form.step_hours(1),
-                                "+"
-                            }
-                            span { "hours" }
                         }
                     }
                 }
+                section { class: "card",
+                    Toggle {
+                        id: "port-testing",
+                        label: "Port testing",
+                        checked: form.port_testing,
+                        ontoggle: move |on| state.write().form.port_testing = on,
+                    }
+                }
             }
-            section { class: "card",
-                Toggle {
-                    id: "port-testing",
-                    label: "Port testing",
-                    checked: form.port_testing,
-                    ontoggle: move |on| state.write().form.port_testing = on,
+            if access_point {
+                section { class: "card",
+                    Toggle {
+                        id: "capwap-on",
+                        label: "CAPWAP addressing",
+                        checked: form.capwap_on,
+                        ontoggle: move |on| state.write().form.capwap_on = on,
+                    }
+                    if form.capwap_on {
+                        div { class: "card-body",
+                            TextField {
+                                id: "capwap-ip",
+                                label: "IP",
+                                value: form.capwap_ip.clone(),
+                                oninput: move |value| state.write().form.capwap_ip = value,
+                            }
+                            TextField {
+                                id: "capwap-mask",
+                                label: "Subnet mask",
+                                value: form.capwap_mask.clone(),
+                                oninput: move |value| state.write().form.capwap_mask = value,
+                            }
+                            TextField {
+                                id: "capwap-gateway",
+                                label: "Default gateway",
+                                value: form.capwap_gateway.clone(),
+                                oninput: move |value| state.write().form.capwap_gateway = value,
+                            }
+                        }
+                    }
                 }
             }
             div { class: "form-actions",
@@ -430,6 +511,27 @@ fn FileField(
                     },
                     "Choose file"
                 }
+            }
+        }
+    }
+}
+
+#[component]
+fn TextField(
+    id: &'static str,
+    label: &'static str,
+    value: String,
+    oninput: EventHandler<String>,
+) -> Element {
+    rsx! {
+        div { class: "field",
+            label { class: "field-label", r#for: id, "{label}" }
+            input {
+                id,
+                class: "text-input mono",
+                r#type: "text",
+                value: "{value}",
+                oninput: move |event: FormEvent| oninput.call(event.value()),
             }
         }
     }
@@ -559,6 +661,7 @@ fn RecordScreen(
         &record.firmware,
         &record.burn_in,
         &record.ports,
+        &record.capwap,
     ];
     let chosen = checks
         .iter()
@@ -573,7 +676,13 @@ fn RecordScreen(
         .iter()
         .filter(|(_, status)| *status == CheckStatus::Passed)
         .count();
-    let can_export = record.configuration == CheckStatus::Passed;
+    let access_point = form.family == DeviceFamily::AccessPoint;
+    let can_export = export_available(form.family, record);
+    let export_waiting = if access_point {
+        "Export is available once every chosen check passes."
+    } else {
+        "Export is available once the configuration check passes."
+    };
     let burn_in_note = form.burn_in_on.then(|| match view.burn_in_remaining {
         Some(left) => format!("{} · {} left", hours_text(form.hours), remaining_text(left)),
         None => hours_text(form.hours),
@@ -587,20 +696,33 @@ fn RecordScreen(
             p { class: "muted", "{passed} of {chosen} passed" }
         }
         ul { class: "checks",
-            CheckRow {
-                name: "Configuration",
-                status: record.configuration.clone(),
-                file: Some(file_name(&form.config_path)),
+            if !access_point {
+                CheckRow {
+                    name: "Configuration",
+                    status: record.configuration.clone(),
+                    file: Some(file_name(&form.config_path)),
+                }
             }
-            CheckRow {
-                name: "Firmware",
-                status: record.firmware.clone(),
-                file: form.firmware_on.then(|| file_name(&form.image_path)),
+            if !access_point || record.firmware != CheckStatus::NotChosen {
+                CheckRow {
+                    name: "Firmware",
+                    status: record.firmware.clone(),
+                    file: form.firmware_on.then(|| file_name(&form.image_path)),
+                }
             }
-            CheckRow { name: "Burn-in", status: record.burn_in.clone(), note: burn_in_note }
-            CheckRow { name: "Ports", status: record.ports.clone(), note: ports_note }
+            if !access_point {
+                CheckRow { name: "Burn-in", status: record.burn_in.clone(), note: burn_in_note }
+                CheckRow { name: "Ports", status: record.ports.clone(), note: ports_note }
+            }
+            if record.capwap != CheckStatus::NotChosen {
+                CheckRow {
+                    name: "CAPWAP",
+                    status: record.capwap.clone(),
+                    file: capwap_line(&form.capwap_ip, &form.capwap_mask, &form.capwap_gateway),
+                }
+            }
         }
-        if form.port_testing {
+        if form.port_testing && !access_point {
             h2 { class: "section-title", "Ports" }
             if view.ports.is_empty() {
                 p { class: "muted", "The device has not listed its ports yet." }
@@ -621,7 +743,7 @@ fn RecordScreen(
                 if can_export {
                     p { "Verification is done, so the export can be saved." }
                 } else {
-                    p { class: "muted", "Export is available once the configuration check passes." }
+                    p { class: "muted", "{export_waiting}" }
                 }
                 button {
                     class: "button primary",
@@ -722,6 +844,32 @@ fn remaining_text(left: Duration) -> String {
     format!("{}h {:02}m", minutes / 60, minutes % 60)
 }
 
+/// The three names on the device-family selector.
+fn device_family(value: &str) -> Option<DeviceFamily> {
+    match value {
+        "IOS-XE" => Some(DeviceFamily::IosXe),
+        "NX-OS" => Some(DeviceFamily::Nxos),
+        "Access point" => Some(DeviceFamily::AccessPoint),
+        _ => None,
+    }
+}
+
+/// IP, then mask and gateway when the form has them.
+fn capwap_line(ip: &str, mask: &str, gateway: &str) -> Option<String> {
+    let ip = ip.trim();
+    if ip.is_empty() {
+        return None;
+    }
+    let mut parts = vec![ip.to_string()];
+    for extra in [mask, gateway] {
+        let extra = extra.trim();
+        if !extra.is_empty() {
+            parts.push(extra.to_string());
+        }
+    }
+    Some(parts.join(" · "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,6 +904,30 @@ mod tests {
         update.export_text = Some("second".into());
         merge_update(&mut window, update);
         assert_eq!(window.export_text.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn family_selector_uses_the_three_family_names() {
+        assert_eq!(device_family("IOS-XE"), Some(DeviceFamily::IosXe));
+        assert_eq!(device_family("NX-OS"), Some(DeviceFamily::Nxos));
+        assert_eq!(
+            device_family("Access point"),
+            Some(DeviceFamily::AccessPoint)
+        );
+        assert_eq!(device_family("ios-xe"), None);
+    }
+
+    #[test]
+    fn capwap_line_shows_the_ip_and_adds_mask_and_gateway_when_set() {
+        assert_eq!(capwap_line("  ", "255.255.255.0", "10.0.0.254"), None);
+        assert_eq!(
+            capwap_line("10.0.0.1", "", ""),
+            Some("10.0.0.1".to_string())
+        );
+        assert_eq!(
+            capwap_line("10.0.0.1", "255.255.255.0", "10.0.0.254"),
+            Some("10.0.0.1 · 255.255.255.0 · 10.0.0.254".to_string())
+        );
     }
 
     #[test]
