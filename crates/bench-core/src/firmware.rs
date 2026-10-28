@@ -6,16 +6,15 @@ pub enum FirmwareCheck {
     NoVersionToken,
 }
 
-/// The first `digits.digits.digits` run in `filename` that is not glued to
-/// another digit, or to a dot and a digit, on either side.
+/// The version in an image file name: the first three consecutive
+/// dot-separated segments where the first two are all digits and the third is
+/// digits optionally followed by lowercase letters (`17.09.04a`).
 pub fn version_token(filename: &str) -> Option<String> {
-    let bytes = filename.as_bytes();
-    (0..bytes.len())
-        .filter(|&start| bytes[start].is_ascii_digit())
-        .find_map(|start| {
-            let end = version_end(bytes, start)?;
-            is_bounded(bytes, start, end).then(|| filename[start..end].to_string())
-        })
+    let segments: Vec<&str> = filename.split('.').collect();
+    segments
+        .windows(3)
+        .find(|w| is_digits(w[0]) && is_digits(w[1]) && is_patch(w[2]))
+        .map(|w| w.join("."))
 }
 
 /// `Pass` when `show_version` contains the image's version as a whole token.
@@ -34,26 +33,14 @@ pub fn firmware_check(filename: &str, show_version: &str) -> FirmwareCheck {
     }
 }
 
-/// End of the `digits.digits.digits` run starting at `start`, if there is one.
-fn version_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut pos = start;
-    for part in 0..3 {
-        if part > 0 {
-            if bytes.get(pos) != Some(&b'.') {
-                return None;
-            }
-            pos += 1;
-        }
-        let digits = bytes[pos..]
-            .iter()
-            .take_while(|b| b.is_ascii_digit())
-            .count();
-        if digits == 0 {
-            return None;
-        }
-        pos += digits;
-    }
-    Some(pos)
+fn is_digits(segment: &str) -> bool {
+    !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Digits, then optional lowercase letters.
+fn is_patch(segment: &str) -> bool {
+    let letters = segment.trim_start_matches(|c: char| c.is_ascii_digit());
+    letters.len() < segment.len() && letters.bytes().all(|b| b.is_ascii_lowercase())
 }
 
 /// True when `bytes[start..end]` is not extended by a digit, or by a dot and a
@@ -106,16 +93,44 @@ mod tests {
     }
 
     #[test]
-    fn token_is_the_first_bounded_run_in_the_filename() {
+    fn token_is_read_from_dot_separated_filename_segments() {
         assert_eq!(
-            version_token("c9300_image_16.9.4.SPA.bin"),
+            version_token("isr4300-universalk9.16.09.04.SPA.bin"),
+            Some("16.09.04".to_string())
+        );
+        assert_eq!(
+            version_token("isr4300-universalk9.17.09.04a.SPA.bin"),
+            Some("17.09.04a".to_string())
+        );
+        assert_eq!(
+            version_token("c9300_image.16.9.4.SPA.bin"),
             Some("16.9.4".to_string())
         );
+    }
+
+    #[test]
+    fn token_requires_digit_segments_and_a_lowercase_suffix_only() {
+        assert_eq!(version_token("image.16.9.SPA.bin"), None);
+        assert_eq!(version_token("image.16.9.A4.bin"), None);
+        assert_eq!(version_token("image.16.9.4A.bin"), None);
+        assert_eq!(version_token("image_16.9.4.bin"), None);
         assert_eq!(
-            version_token("a_1.2.3.4_9.8.7.bin"),
-            Some("9.8.7".to_string())
+            version_token("a.1.2.x.3.4.5b.bin"),
+            Some("3.4.5b".to_string())
         );
-        assert_eq!(version_token("1.2.3.4.bin"), None);
+    }
+
+    #[test]
+    fn suffixed_token_must_appear_whole_in_show_version() {
+        let name = "isr4300-universalk9.17.09.04a.SPA.bin";
+        assert_eq!(
+            firmware_check(name, "Version 17.09.04a, RELEASE SOFTWARE"),
+            FirmwareCheck::Pass
+        );
+        assert_eq!(
+            firmware_check(name, "Version 17.09.04"),
+            FirmwareCheck::VersionMismatch
+        );
     }
 
     #[test]
