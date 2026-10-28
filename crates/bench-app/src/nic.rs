@@ -5,7 +5,10 @@ use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use bench_core::server_address;
 use netdev::prelude::{Interface, InterfaceType};
@@ -88,7 +91,38 @@ pub fn release_server_address(port: &str) -> io::Result<()> {
 /// The elevated process that adds the server address and binds UDP 69.
 pub struct ImageServer {
     job: PathBuf,
-    helper: JoinHandle<io::Result<()>>,
+    helper: Option<JoinHandle<io::Result<()>>>,
+}
+
+/// The helper the window must stop if it closes while a copy is in progress.
+/// The worker thread is detached, so closing the window does not drop
+/// `ImageServer`.
+#[derive(Clone)]
+struct ActiveServer {
+    job: PathBuf,
+    /// Set once the elevated process has exited and removed the address.
+    finished: Arc<AtomicBool>,
+}
+
+static ACTIVE: Mutex<Option<ActiveServer>> = Mutex::new(None);
+
+fn remember_active(job: PathBuf, finished: Arc<AtomicBool>) {
+    *ACTIVE.lock().unwrap() = Some(ActiveServer { job, finished });
+}
+
+fn forget_active(job: &Path) {
+    let mut slot = ACTIVE.lock().unwrap();
+    if slot.as_ref().is_some_and(|active| active.job == job) {
+        *slot = None;
+    }
+}
+
+struct HelperFinished(Arc<AtomicBool>);
+
+impl Drop for HelperFinished {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 impl ImageServer {
@@ -101,7 +135,11 @@ impl ImageServer {
             if let Some(failure) = self.read_error() {
                 return Err(failure);
             }
-            if self.helper.is_finished() {
+            if self
+                .helper
+                .as_ref()
+                .is_some_and(|helper| helper.is_finished())
+            {
                 if let Some(failure) = self.read_error() {
                     return Err(failure);
                 }
@@ -114,12 +152,22 @@ impl ImageServer {
     }
 
     /// Asks the helper to stop and waits until it has removed the address.
-    pub fn finish(self) -> io::Result<()> {
+    pub fn finish(mut self) -> io::Result<()> {
+        self.stop_helper()
+    }
+
+    /// Writes the stop file and waits until the helper has exited. The helper
+    /// removes the laptop address on its way out.
+    fn stop_helper(&mut self) -> io::Result<()> {
         let _ = fs::write(self.job.join("stop"), b"");
-        let joined = match self.helper.join() {
-            Ok(result) => result,
-            Err(_) => Err(io::Error::other("the TFTP server stopped unexpectedly")),
+        let joined = match self.helper.take() {
+            Some(helper) => match helper.join() {
+                Ok(result) => result,
+                Err(_) => Err(io::Error::other("the TFTP server stopped unexpectedly")),
+            },
+            None => Ok(()),
         };
+        forget_active(&self.job);
         let _ = fs::remove_dir_all(&self.job);
         joined
     }
@@ -129,6 +177,33 @@ impl ImageServer {
             .ok()
             .map(|text| read_start_failure(&text))
     }
+}
+
+impl Drop for ImageServer {
+    fn drop(&mut self) {
+        let _ = self.stop_helper();
+    }
+}
+
+/// Stops the image server if a copy is in progress. Closing the window
+/// exits the process without dropping the worker's `ImageServer`, so this
+/// writes the same stop file and waits until the elevated process has
+/// removed the address.
+pub fn stop_active_image_server() {
+    let active = ACTIVE.lock().unwrap().clone();
+    let Some(active) = active else {
+        return;
+    };
+    let _ = fs::write(active.job.join("stop"), b"");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !active.finished.load(Ordering::SeqCst) {
+        if Instant::now() >= deadline {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    forget_active(&active.job);
+    let _ = fs::remove_dir_all(&active.job);
 }
 
 /// Starts the elevated helper that adds `port`'s server address and binds
@@ -146,7 +221,10 @@ pub fn spawn_image_server(port: &str, image: &Path, chosen: &str) -> io::Result<
     };
     let command = elevated_server_command(&exe, crate::tftp::device_bind(), &job);
     let job_for_thread = job.clone();
+    let finished = Arc::new(AtomicBool::new(false));
+    remember_active(job.clone(), Arc::clone(&finished));
     let helper = thread::spawn(move || {
+        let _finished = HelperFinished(finished);
         let result = platform::run_elevated_shell(&command);
         if let Err(ref err) = result {
             let path = job_for_thread.join("error");
@@ -156,13 +234,13 @@ pub fn spawn_image_server(port: &str, image: &Path, chosen: &str) -> io::Result<
         }
         result
     });
-    Ok(ImageServer { job, helper })
+    Ok(ImageServer {
+        job,
+        helper: Some(helper),
+    })
 }
 
 fn create_job(port: &str, image: &Path, chosen: &str) -> io::Result<PathBuf> {
-    let image = image
-        .to_str()
-        .ok_or_else(|| io::Error::other("the image path is not valid text"))?;
     let dir = std::env::temp_dir().join(format!(
         "bench-tftp-{}-{}",
         std::process::id(),
@@ -172,10 +250,24 @@ fn create_job(port: &str, image: &Path, chosen: &str) -> io::Result<PathBuf> {
             .unwrap_or(0)
     ));
     fs::create_dir_all(&dir)?;
-    fs::write(dir.join("port"), port)?;
-    fs::write(dir.join("image"), image)?;
-    fs::write(dir.join("chosen"), chosen)?;
-    Ok(dir)
+    let created = (|| {
+        // The elevated helper is denied Downloads, Documents, Desktop, and
+        // removable volumes. The app process can read the picked file, so
+        // the helper serves this copy.
+        let copy = dir.join("firmware");
+        fs::copy(image, &copy)?;
+        let copy = copy
+            .to_str()
+            .ok_or_else(|| io::Error::other("the copied image path is not valid text"))?;
+        fs::write(dir.join("port"), port)?;
+        fs::write(dir.join("image"), copy)?;
+        fs::write(dir.join("chosen"), chosen)?;
+        Ok(dir.clone())
+    })();
+    if created.is_err() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+    created
 }
 
 /// A wired port the system names for its user. macOS also has unnamed
@@ -413,7 +505,10 @@ mod tests {
     use std::fs;
     use std::io;
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn the_elevated_helper_binds_the_device_tftp_port() {
@@ -450,7 +545,7 @@ mod tests {
         });
         let server = super::ImageServer {
             job: job.clone(),
-            helper,
+            helper: Some(helper),
         };
         let failure = server.wait_until_listening().unwrap_err();
         assert_eq!(
@@ -458,6 +553,85 @@ mod tests {
             super::StartFailure::Bind("Address not available".into())
         );
         let _ = server.finish();
+    }
+
+    #[test]
+    fn the_helper_receives_a_copy_of_the_picked_image() {
+        let src = std::env::temp_dir().join(format!("bench-image-src-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&src);
+        fs::create_dir_all(&src).unwrap();
+        let picked = src.join("closet.17.12.05.bin");
+        fs::write(&picked, b"firmware-bytes").unwrap();
+        let job = super::create_job("en5", &picked, "closet.17.12.05.bin").unwrap();
+        let handed = fs::read_to_string(job.join("image")).unwrap();
+        let handed = Path::new(handed.trim());
+        assert_eq!(handed, job.join("firmware"));
+        assert_ne!(handed, picked);
+        assert_eq!(fs::read(handed).unwrap(), b"firmware-bytes");
+        fs::write(&picked, b"changed").unwrap();
+        assert_eq!(fs::read(handed).unwrap(), b"firmware-bytes");
+        let missing = src.join("missing.bin");
+        assert!(super::create_job("en5", &missing, "missing.bin").is_err());
+        let _ = fs::remove_dir_all(&job);
+        let _ = fs::remove_dir_all(&src);
+    }
+
+    #[test]
+    fn dropping_the_image_server_stops_the_helper() {
+        let job = std::env::temp_dir().join(format!("bench-tftp-drop-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&job);
+        fs::create_dir_all(&job).unwrap();
+        let posted = job.clone();
+        let saw_stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&saw_stop);
+        let helper = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if posted.join("stop").exists() {
+                    thread::sleep(Duration::from_millis(50));
+                    flag.store(true, Ordering::SeqCst);
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::other("the stop file never appeared"));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        drop(super::ImageServer {
+            job,
+            helper: Some(helper),
+        });
+        assert!(saw_stop.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn closing_the_window_stops_the_active_helper() {
+        let job = std::env::temp_dir().join(format!("bench-tftp-quit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&job);
+        fs::create_dir_all(&job).unwrap();
+        let posted = job.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        let helper = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if posted.join("stop").exists() {
+                    flag.store(true, Ordering::SeqCst);
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::other("the stop file never appeared"));
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        super::remember_active(job.clone(), Arc::clone(&finished));
+        super::stop_active_image_server();
+        assert!(finished.load(Ordering::SeqCst));
+        assert!(helper.join().unwrap().is_ok());
+        super::forget_active(&job);
+        let _ = fs::remove_dir_all(&job);
     }
 
     #[cfg(target_os = "macos")]

@@ -35,6 +35,7 @@ fn main() {
     initial.serial_devices = serial::serial_devices();
     initial.ethernet_ports = nic::ethernet_ports();
     open_window(commands, initial, worker_updates);
+    nic::stop_active_image_server();
 }
 
 /// The worker's updates, which the root component takes once.
