@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Cisco CBT App — Ready to release</title>
+  <link rel="stylesheet" href="../app.css" />
+  <style>
+    html, body { width: 1180px; height: 780px; }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <div class="activity-bar" aria-hidden="true"><div class="app-mark">XE</div></div>
+    <aside class="sidebar" aria-label="On the console">
+      <h2 class="sidebar-title">On the console</h2>
+      <div class="device-card">
+        <p class="device-name">closet-2-sw1</p>
+        <dl class="device-facts">
+          <dt>Serial device</dt>
+          <dd class="mono">/dev/cu.usbserial-1420</dd>
+          <dt>Configuration file</dt>
+          <dd class="mono">closet-access.cfg</dd>
+          <dt>Firmware image</dt>
+          <dd class="mono">cat9k_iosxe.17.12.05.SPA.bin</dd>
+        </dl>
+      </div>
+    </aside>
+    <div class="workspace">
+      <div class="reminder" role="status">
+        <p class="reminder-title">Password used on this device</p>
+        <p class="reminder-line mono">Username cisco · password Passw0rd% · enable secret Passw0rd%</p>
+      </div>
+      <main class="main">
+        <div class="record-header">
+          <h1 class="screen-title">Ready to release</h1>
+          <p class="muted">4 of 4 passed</p>
+        </div>
+        <ul class="checks">
+          <li class="check">
+            <div class="check-head">
+              <div>
+                <p class="check-name">Configuration</p>
+                <p class="check-sub mono">closet-access.cfg</p>
+              </div>
+              <p class="check-status status-pass">Passed</p>
+            </div>
+          </li>
+          <li class="check">
+            <div class="check-head">
+              <div>
+                <p class="check-name">Firmware</p>
+                <p class="check-sub mono">cat9k_iosxe.17.12.05.SPA.bin</p>
+              </div>
+              <p class="check-status status-pass">Passed</p>
+            </div>
+          </li>
+          <li class="check">
+            <div class="check-head">
+              <div>
+                <p class="check-name">Burn-in</p>
+                <p class="check-sub">4 hours</p>
+              </div>
+              <p class="check-status status-pass">Passed</p>
+            </div>
+          </li>
+          <li class="check">
+            <div class="check-head">
+              <div>
+                <p class="check-name">Ports</p>
+                <p class="check-sub">24 of 24 ports passed</p>
+              </div>
+              <p class="check-status status-pass">Passed</p>
+            </div>
+          </li>
+        </ul>
+        <section class="card export">
+          <div class="export-row">
+            <p>Verification is done, so the export can be saved.</p>
+            <button class="button primary" type="button">Export validation</button>
+          </div>
+          <div class="export-preview">
+            <h2>Exported validation</h2>
+            <pre class="mono">Serial number: FOC2345L0AB
+Host name: closet-2-sw1
+Configuration: Passed · closet-access.cfg
+Firmware: Passed · Version 17.12.05
+Burn-in: Passed · 4 hours
+  closet-2-sw1 uptime is 4 hours, 6 minutes
+Ports: 24 of 24 passed</pre>
+          </div>
+        </section>
+      </main>
+      <section class="console-panel" aria-label="Console transcript">
+        <h2 class="console-title">Console</h2>
+        <div class="console-scroll">
+          <pre class="mono">closet-2-sw1# show version | include uptime
+closet-2-sw1 uptime is 4 hours, 6 minutes
+closet-2-sw1#</pre>
+        </div>
+      </section>
+    </div>
+    <footer class="status-bar">
+      <button class="status-button" type="button" aria-pressed="true">Console</button>
+      <span>9600 8N1</span>
+      <span class="mono">/dev/cu.usbserial-1420</span>
+    </footer>
+  </div>
+</body>
+</html>

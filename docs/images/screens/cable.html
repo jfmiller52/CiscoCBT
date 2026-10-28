@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Cisco CBT App — Firmware cable</title>
+  <link rel="stylesheet" href="../app.css" />
+  <style>
+    html, body { width: 1180px; height: 780px; }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <div class="activity-bar" aria-hidden="true"><div class="app-mark">XE</div></div>
+    <aside class="sidebar" aria-label="On the console">
+      <h2 class="sidebar-title">On the console</h2>
+      <div class="device-card">
+        <p class="device-name">Switch</p>
+        <dl class="device-facts">
+          <dt>Serial device</dt>
+          <dd class="mono">/dev/cu.usbserial-1420</dd>
+          <dt>Configuration file</dt>
+          <dd class="mono">closet-access.cfg</dd>
+          <dt>Firmware image</dt>
+          <dd class="mono">cat9k_iosxe.17.12.05.SPA.bin</dd>
+        </dl>
+      </div>
+    </aside>
+    <div class="workspace">
+      <main class="main">
+        <p class="prompt-lead">Plug the ethernet cable from this computer’s TFTP port into</p>
+        <p class="port-name mono">GigabitEthernet1/0/1</p>
+        <p class="prompt-note">That is the first physical port the device reported.</p>
+        <div class="prompt-action">
+          <button class="button primary" type="button">Cable is in</button>
+        </div>
+      </main>
+    </div>
+    <footer class="status-bar">
+      <button class="status-button" type="button">Console</button>
+      <span>9600 8N1</span>
+      <span class="mono">/dev/cu.usbserial-1420</span>
+    </footer>
+  </div>
+</body>
+</html>

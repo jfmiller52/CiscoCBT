@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Cisco CBT App — Start a run</title>
+  <link rel="stylesheet" href="../app.css" />
+  <style>
+    html, body { width: 1180px; height: 780px; }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <div class="activity-bar" aria-hidden="true"><div class="app-mark">XE</div></div>
+    <aside class="sidebar" aria-label="On the console">
+      <h2 class="sidebar-title">On the console</h2>
+      <div class="device-card">
+        <p class="device-name unknown">Host name not read yet</p>
+        <dl class="device-facts">
+          <dt>Serial device</dt>
+          <dd class="mono">/dev/cu.usbserial-1420</dd>
+          <dt>Configuration file</dt>
+          <dd class="mono">closet-access.cfg</dd>
+          <dt>Firmware image</dt>
+          <dd class="mono">cat9k_iosxe.17.12.05.SPA.bin</dd>
+        </dl>
+      </div>
+    </aside>
+    <div class="workspace">
+      <main class="main">
+        <h1 class="screen-title">Start a run</h1>
+        <div class="form">
+          <section class="card">
+            <label class="field-label">Serial device</label>
+            <div class="select mono" style="padding:7px 10px">/dev/cu.usbserial-1420</div>
+          </section>
+          <section class="card">
+            <div class="field">
+              <p class="field-label">Configuration file</p>
+              <div class="file-row">
+                <p class="path mono">/Users/tech/configs/closet-access.cfg</p>
+                <button class="button" type="button">Choose file</button>
+              </div>
+            </div>
+          </section>
+          <section class="card">
+            <div class="toggle-row">
+              <input class="switch" type="checkbox" checked disabled />
+              <label>Upgrade firmware</label>
+            </div>
+            <div class="card-body">
+              <div class="field">
+                <p class="field-label">Firmware image</p>
+                <div class="file-row">
+                  <p class="path mono">/Users/tech/images/cat9k_iosxe.17.12.05.SPA.bin</p>
+                  <button class="button" type="button">Choose file</button>
+                </div>
+              </div>
+              <div class="field">
+                <label class="field-label">Ethernet port on this computer</label>
+                <div class="select mono" style="padding:7px 10px">en0</div>
+              </div>
+            </div>
+          </section>
+          <section class="card">
+            <div class="toggle-row">
+              <input class="switch" type="checkbox" checked disabled />
+              <label>Burn-in</label>
+            </div>
+            <div class="card-body">
+              <label class="hours-label">Length, in whole hours</label>
+              <div class="stepper">
+                <button class="button step" type="button">−</button>
+                <input class="hours-input mono" type="text" value="4" readonly />
+                <button class="button step" type="button">+</button>
+                <span>hours</span>
+              </div>
+            </div>
+          </section>
+          <section class="card">
+            <div class="toggle-row">
+              <input class="switch" type="checkbox" checked disabled />
+              <label>Port testing</label>
+            </div>
+          </section>
+          <div class="form-actions">
+            <button class="button primary" type="button">Start</button>
+          </div>
+        </div>
+      </main>
+    </div>
+    <footer class="status-bar">
+      <button class="status-button" type="button">Console</button>
+      <span>9600 8N1</span>
+      <span class="mono">/dev/cu.usbserial-1420</span>
+    </footer>
+  </div>
+</body>
+</html>
