@@ -14,6 +14,7 @@ pub mod runner;
 pub mod scripted;
 pub mod session;
 pub mod strategy;
+pub mod strategy_ap;
 pub mod strategy_iosxe;
 pub mod strategy_nxos;
 pub mod tftp;

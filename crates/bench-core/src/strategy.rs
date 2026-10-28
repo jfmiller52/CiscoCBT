@@ -19,12 +19,12 @@ pub trait FamilyStrategy: Send + Sync {
     fn save_startup_command(&self) -> &'static str;
 }
 
-/// Strategy for `family`. Access points are owned by Task 6.
+/// Strategy for `family`.
 pub fn strategy_for(family: DeviceFamily) -> &'static dyn FamilyStrategy {
     match family {
         DeviceFamily::IosXe => &crate::strategy_iosxe::IOS_XE,
         DeviceFamily::Nxos => &crate::strategy_nxos::NX_OS,
-        DeviceFamily::AccessPoint => todo!("Task 6"),
+        DeviceFamily::AccessPoint => &crate::strategy_ap::ACCESS_POINT,
     }
 }
 
@@ -340,9 +340,106 @@ mgmt0         --
         );
     }
 
+    fn ap() -> &'static dyn FamilyStrategy {
+        strategy_for(DeviceFamily::AccessPoint)
+    }
+
     #[test]
-    #[should_panic(expected = "Task 6")]
-    fn access_point_strategy_is_left_for_task_6() {
-        strategy_for(DeviceFamily::AccessPoint);
+    fn access_point_copy_tftp_command_contains_the_server_and_filename() {
+        let command = ap().copy_tftp_command("ap.img");
+        assert!(!command.is_empty());
+        assert!(command.contains("192.0.2.1"));
+        assert!(command.contains("ap.img"));
+        assert_eq!(command, "copy tftp://192.0.2.1/ap.img flash:ap.img");
+    }
+
+    #[test]
+    fn access_point_assign_address_is_routed_ethernet_without_capwap() {
+        let commands = vec![
+            "configure terminal".to_string(),
+            "interface GigabitEthernet0".to_string(),
+            "ip address 192.0.2.2 255.255.255.252".to_string(),
+            "no shutdown".to_string(),
+            "end".to_string(),
+        ];
+        assert_eq!(
+            ap().assign_address_commands(LinkKind::Switch, "GigabitEthernet0"),
+            commands
+        );
+        assert_eq!(
+            ap().assign_address_commands(LinkKind::Router, "GigabitEthernet0"),
+            commands
+        );
+    }
+
+    #[test]
+    fn access_point_clear_address_removes_only_the_ip() {
+        assert_eq!(
+            ap().clear_address_commands("GigabitEthernet0"),
+            vec![
+                "configure terminal".to_string(),
+                "interface GigabitEthernet0".to_string(),
+                "no ip address".to_string(),
+                "end".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn access_point_install_overwrites_the_flash_image_and_reloads() {
+        assert_eq!(
+            ap().install_and_reload_commands("ap.img"),
+            vec!["archive download-sw /overwrite /reload flash:ap.img".to_string()]
+        );
+    }
+
+    /// `show ip interface brief` on a CAPWAP AP. Radios and BVI are not the
+    /// ethernet uplink used for TFTP.
+    const AP_INTERFACE_BRIEF: &str = "\
+Interface                  IP-Address      OK? Method Status                Protocol
+BVI1                       unassigned      YES NVRAM  administratively down down
+Dot11Radio0                unassigned      YES unset  administratively down down
+Dot11Radio1                unassigned      YES unset  administratively down down
+GigabitEthernet0           unassigned      YES NVRAM  up                    up
+";
+
+    #[test]
+    fn access_point_interface_brief_keeps_gigabitethernet0_as_first_physical() {
+        let names = ap().parse_interface_names(AP_INTERFACE_BRIEF);
+        assert_eq!(names, vec!["GigabitEthernet0".to_string()]);
+        assert_eq!(
+            crate::ports::first_physical(&names).as_deref(),
+            Some("GigabitEthernet0")
+        );
+        assert_eq!(ap().list_interfaces_command(), "show ip interface brief");
+    }
+
+    #[test]
+    fn access_point_show_and_save_commands() {
+        assert_eq!(ap().show_version_command(), "show version");
+        assert_eq!(ap().show_running_config_command(), "show running-config");
+        assert_eq!(ap().show_uptime_command(), "show version | include uptime");
+        assert_eq!(
+            ap().save_startup_command(),
+            "copy running-config startup-config"
+        );
+    }
+
+    #[test]
+    fn access_point_port_helpers_are_unused() {
+        assert!(!ap().port_passed(
+            LinkKind::Switch,
+            "GigabitEthernet0",
+            "GigabitEthernet0 is up, line protocol is up"
+        ));
+        assert!(!ap().port_passed(LinkKind::Router, "GigabitEthernet0", "connected"));
+        assert_eq!(
+            ap().port_status_command(LinkKind::Switch, "GigabitEthernet0"),
+            ""
+        );
+        assert_eq!(
+            ap().port_status_command(LinkKind::Router, "GigabitEthernet0"),
+            ""
+        );
     }
 }
