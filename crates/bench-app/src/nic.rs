@@ -134,18 +134,20 @@ mod platform {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
+    /// `store=active` keeps the address only until the next reboot.
     pub fn add_command(port: &str) -> io::Result<String> {
         Ok(format!(
-            "interface ipv4 add address \"{}\" {} {}",
+            "interface ipv4 add address \"{}\" {} {} store=active",
             checked(port)?,
             server_address(),
             mask()
         ))
     }
 
+    /// Deletes from the active store, the only one the address was added to.
     pub fn remove_command(port: &str) -> io::Result<String> {
         Ok(format!(
-            "interface ipv4 delete address \"{}\" {}",
+            "interface ipv4 delete address \"{}\" {} store=active",
             checked(port)?,
             server_address()
         ))
@@ -235,11 +237,11 @@ mod tests {
     fn windows_adds_and_removes_the_server_address_with_netsh() {
         assert_eq!(
             add_command("Ethernet 2").unwrap(),
-            "interface ipv4 add address \"Ethernet 2\" 192.0.2.1 255.255.255.252"
+            "interface ipv4 add address \"Ethernet 2\" 192.0.2.1 255.255.255.252 store=active"
         );
         assert_eq!(
             remove_command("Ethernet 2").unwrap(),
-            "interface ipv4 delete address \"Ethernet 2\" 192.0.2.1"
+            "interface ipv4 delete address \"Ethernet 2\" 192.0.2.1 store=active"
         );
         assert!(add_command("Ethernet \"2\"").is_err());
     }

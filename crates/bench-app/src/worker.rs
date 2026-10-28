@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -14,7 +14,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use bench_core::{
-    export_text, server_address, CheckStatus, Phase, RunFiles, RunOptions, Runner, Session,
+    export_text, server_address, CheckStatus, Console, Phase, RunFiles, RunOptions, Runner, Session,
 };
 
 use crate::awake::KeepAwake;
@@ -251,6 +251,13 @@ impl Run {
         } else {
             None
         };
+        // The copy is the console work of this phase. It starts only after
+        // the server is bound, and not at all when startup aborted the run.
+        if before == Phase::CopyImage && self.runner.phase() == Phase::Stopped {
+            self.awake = None;
+            self.stalled = true;
+            return;
+        }
         let after = self.runner.advance();
         if let Some(tftp) = tftp {
             self.finish_tftp(tftp);
@@ -267,30 +274,24 @@ impl Run {
 
     fn start_tftp(&mut self) -> Option<Tftp> {
         let firmware = self.options.firmware.as_ref()?;
-        let port = &firmware.local_ethernet;
-        let address_on = match nic::add_server_address(port) {
-            Ok(()) => Some(port.clone()),
-            Err(err) => {
-                self.notes.push(format!(
-                    "{port} could not be given the address {}: {err}",
-                    server_address()
-                ));
-                None
-            }
-        };
+        let port = firmware.local_ethernet.clone();
+        if !claim_laptop_address(&mut self.runner, &port) {
+            return None;
+        }
+        let path = PathBuf::from(&firmware.image_path);
+        let chosen = file_name(&firmware.image_path);
         let address = server_address()
             .parse()
             .expect("the server address is an IP address");
         let bind = SocketAddr::new(address, TFTP_PORT);
-        let path = PathBuf::from(&firmware.image_path);
-        let chosen = file_name(&firmware.image_path);
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&stop);
-        let server = thread::spawn(move || tftp::serve(&path, &chosen, bind, flag));
+        let Some(bound) = bind_tftp_or_abort(&mut self.runner, &path, &chosen, bind) else {
+            self.remove_server_address(&port);
+            return None;
+        };
         Some(Tftp {
-            stop,
-            server,
-            address_on,
+            stop: bound.stop,
+            server: bound.server,
+            address_on: Some(port),
         })
     }
 
@@ -307,12 +308,16 @@ impl Run {
                 .push("The TFTP server on this computer stopped unexpectedly.".into()),
         }
         if let Some(port) = tftp.address_on {
-            if let Err(err) = nic::remove_server_address(&port) {
-                self.notes.push(format!(
-                    "The address {} could not be removed from {port}: {err}",
-                    server_address()
-                ));
-            }
+            self.remove_server_address(&port);
+        }
+    }
+
+    fn remove_server_address(&mut self, port: &str) {
+        if let Err(err) = nic::remove_server_address(port) {
+            self.notes.push(format!(
+                "The address {} could not be removed from {port}: {err}",
+                server_address()
+            ));
         }
     }
 
@@ -343,6 +348,49 @@ impl Run {
     }
 }
 
+struct BoundServer {
+    stop: Arc<AtomicBool>,
+    server: JoinHandle<io::Result<u64>>,
+}
+
+/// Puts the server address on `port`. Aborts the run when that cannot be
+/// done. Returns whether the address is in place.
+fn claim_laptop_address<C: Console>(runner: &mut Runner<C>, port: &str) -> bool {
+    match nic::add_server_address(port) {
+        Ok(()) => true,
+        Err(err) => {
+            runner.abort(&format!(
+                "The laptop address for the image copy could not be set: {err}"
+            ));
+            false
+        }
+    }
+}
+
+/// Binds the TFTP server and leaves it waiting for the device. Aborts the
+/// run when the image cannot be opened or the socket cannot be bound.
+/// Returns only once the socket is bound, so the caller can start the
+/// console copy.
+fn bind_tftp_or_abort<C: Console>(
+    runner: &mut Runner<C>,
+    path: &Path,
+    chosen: &str,
+    bind: SocketAddr,
+) -> Option<BoundServer> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let prepared = match tftp::prepare(path, bind, &stop) {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            runner.abort(&format!("The TFTP server could not start on {bind}: {err}"));
+            return None;
+        }
+    };
+    let flag = Arc::clone(&stop);
+    let chosen = chosen.to_string();
+    let server = thread::spawn(move || tftp::serve_prepared(prepared, &chosen, flag));
+    Some(BoundServer { stop, server })
+}
+
 /// The first port of the walk that has not passed.
 fn current_port(ports: &[(String, CheckStatus)]) -> Option<String> {
     ports
@@ -355,6 +403,8 @@ fn current_port(ports: &[(String, CheckStatus)]) -> Option<String> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    use bench_core::ScriptedConsole;
 
     fn options(serial_device: &str, config_path: &str) -> RunOptions {
         RunOptions {
@@ -430,6 +480,74 @@ mod tests {
         assert_eq!(sent[1].phase, Some(Phase::Login));
         assert_eq!(sent[1].transcript, "\r\nSwitch>enable\r\nSwitch#");
         assert_eq!(sent[1].export_text, None);
+    }
+
+    fn image(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("bench-worker-test");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, b"image").unwrap();
+        path
+    }
+
+    fn scripted_runner() -> Runner<ScriptedConsole> {
+        let options = RunOptions {
+            serial_device: "/dev/cu.bench-test".into(),
+            config_path: "/bench/closet-access.cfg".into(),
+            firmware: None,
+            burn_in_hours: None,
+            port_testing: false,
+        };
+        let files = RunFiles {
+            config_name: "closet-access.cfg".into(),
+            config_body: "hostname closet-2-sw1\n".into(),
+            image_name: None,
+        };
+        Runner::new(Session::new(ScriptedConsole::new(vec![])), options, files)
+    }
+
+    #[test]
+    fn a_laptop_address_that_cannot_be_set_aborts_the_run() {
+        let mut runner = scripted_runner();
+        let claimed = claim_laptop_address(&mut runner, "no \"such\" port");
+        assert_eq!(runner.phase(), Phase::Stopped);
+        assert!(!claimed);
+        let reason = runner.stop_reason().unwrap();
+        assert!(
+            reason.starts_with("The laptop address for the image copy could not be set:"),
+            "{reason}"
+        );
+        assert!(runner.session().console().written().is_empty());
+    }
+
+    #[test]
+    fn a_server_that_cannot_bind_its_address_aborts_the_run() {
+        let taken = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let bind = taken.local_addr().unwrap();
+        let mut runner = scripted_runner();
+        let name = "taken.17.12.05.bin";
+        let server = bind_tftp_or_abort(&mut runner, &image(name), name, bind);
+        assert_eq!(runner.phase(), Phase::Stopped);
+        assert!(server.is_none());
+        let reason = runner.stop_reason().unwrap();
+        let expected = format!("The TFTP server could not start on {bind}:");
+        assert!(reason.starts_with(&expected), "{reason}");
+        assert!(runner.session().console().written().is_empty());
+    }
+
+    #[test]
+    fn a_bound_server_waits_for_the_device_until_it_is_stopped() {
+        let mut runner = scripted_runner();
+        let name = "waiting.17.12.05.bin";
+        let bind = SocketAddr::from(([127, 0, 0, 1], 0));
+        let server = bind_tftp_or_abort(&mut runner, &image(name), name, bind)
+            .expect("the server did not start on a free address");
+        assert_eq!(runner.phase(), Phase::Login);
+        assert!(runner.stop_reason().is_none());
+        assert!(!server.server.is_finished());
+        server.stop.store(true, Ordering::SeqCst);
+        let err = server.server.join().unwrap().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
     }
 
     #[test]

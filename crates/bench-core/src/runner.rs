@@ -161,6 +161,16 @@ impl<C: Console> Runner<C> {
         self.wait_finished = true;
     }
 
+    /// Stops the run for a reason found off the console, failing the check
+    /// the current phase belongs to. Does nothing once the run has ended.
+    pub fn abort(&mut self, reason: &str) {
+        if matches!(self.phase, Phase::Done | Phase::Stopped) {
+            return;
+        }
+        let check = self.check_of(self.phase);
+        self.stop(check, reason.to_string(), reason.to_string());
+    }
+
     /// Checks one port of the walk and returns whether it passed. A retry
     /// replaces that port's earlier result.
     pub fn check_port(&mut self, name: &str) -> Result<bool, SessionError> {
@@ -1168,6 +1178,46 @@ mod tests {
     #[test]
     fn no_ports_is_not_finished_rather_than_passed() {
         assert_eq!(ports_status(&[]), CheckStatus::NotFinished);
+    }
+
+    #[test]
+    fn abort_fails_the_phases_check_without_console_work_and_not_once_the_run_ended() {
+        let mut runner = firmware_runner(IMAGE);
+        assert_eq!(drive(&mut runner), Phase::NameTftpPort);
+        runner.confirm_cable();
+        assert_eq!(runner.advance(), Phase::CopyImage);
+        let before = writes(&runner);
+        let reason = "The TFTP server could not start on 192.0.2.1:69: Address already in use";
+        runner.abort(reason);
+        assert_eq!(runner.phase(), Phase::Stopped);
+        assert_eq!(
+            runner.record().firmware,
+            CheckStatus::Failed {
+                detail: reason.into()
+            }
+        );
+        assert_eq!(runner.record().configuration, CheckStatus::NotFinished);
+        assert_eq!(runner.stop_reason(), Some(reason));
+        assert_eq!(writes(&runner), before);
+        runner.abort("A later reason.");
+        assert_eq!(runner.stop_reason(), Some(reason));
+
+        let mut at_login = runner_for_body(BODY);
+        at_login.abort("The serial device closed.");
+        assert_eq!(
+            at_login.record().configuration,
+            CheckStatus::Failed {
+                detail: "The serial device closed.".into()
+            }
+        );
+        assert_eq!(writes(&at_login), 0);
+
+        let mut done = config_only_runner(ok_running_config());
+        assert_eq!(drive(&mut done), Phase::Done);
+        done.abort("Too late.");
+        assert_eq!(done.phase(), Phase::Done);
+        assert_eq!(done.stop_reason(), None);
+        assert_eq!(done.record().configuration, CheckStatus::Passed);
     }
 
     #[test]

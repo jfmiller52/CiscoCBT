@@ -21,18 +21,37 @@ const RETRANSMIT: Duration = Duration::from_secs(1);
 const TRIES: u32 = 5;
 const READ_BUFFER: usize = 64 * 1024;
 
-/// Serves one read of `chosen` from the file at `path` and returns the bytes
-/// sent. A request for any other name gets File not found. Ends with
-/// `Interrupted` once `stop` is set.
-pub fn serve(
-    path: &Path,
-    chosen: &str,
-    bind: SocketAddr,
-    stop: Arc<AtomicBool>,
-) -> io::Result<u64> {
+/// The image file and a socket already bound to the server address.
+pub struct Prepared {
+    file: File,
+    size: u64,
+    listener: UdpSocket,
+}
+
+/// Opens `path` and binds `bind`. Retries while the address is not assigned
+/// yet. Returns only once the socket is bound, so the caller can start the
+/// device copy after this succeeds.
+pub fn prepare(path: &Path, bind: SocketAddr, stop: &AtomicBool) -> io::Result<Prepared> {
     let file = File::open(path)?;
     let size = file.metadata()?.len();
-    let listener = bind_when_available(bind, &stop)?;
+    let listener = bind_when_available(bind, stop)?;
+    Ok(Prepared {
+        file,
+        size,
+        listener,
+    })
+}
+
+/// Serves one read of `chosen` on a socket from [`prepare`] and returns the
+/// bytes sent. A request for any other name gets File not found. Ends with
+/// `Interrupted` once `stop` is set.
+pub fn serve_prepared(prepared: Prepared, chosen: &str, stop: Arc<AtomicBool>) -> io::Result<u64> {
+    let Prepared {
+        file,
+        size,
+        listener,
+    } = prepared;
+    let ip = listener.local_addr()?.ip();
     listener.set_read_timeout(Some(POLL))?;
     let mut buf = [0u8; 1024];
     loop {
@@ -45,7 +64,7 @@ pub fn serve(
         let Some(request) = parse_rrq(&buf[..len]) else {
             continue;
         };
-        let transfer = UdpSocket::bind(SocketAddr::new(bind.ip(), 0))?;
+        let transfer = UdpSocket::bind(SocketAddr::new(ip, 0))?;
         transfer.connect(peer)?;
         if !serves(&request, chosen) {
             // The device asks again or gives up whether or not this arrives.
@@ -166,17 +185,15 @@ mod tests {
         (path, bytes)
     }
 
-    /// Starts `serve` for `chosen` on a free loopback port.
+    /// Binds a free loopback port and serves `chosen` on it. The socket stays
+    /// open, so another test cannot take the port before the server binds.
     fn start(path: &Path, chosen: &str) -> Server {
-        let port = UdpSocket::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         let stop = Arc::new(AtomicBool::new(false));
-        let (path, chosen, flag) = (path.to_path_buf(), chosen.to_string(), Arc::clone(&stop));
-        let bind = SocketAddr::from(([127, 0, 0, 1], port));
-        let server = thread::spawn(move || serve(&path, &chosen, bind, flag));
+        let prepared = prepare(path, SocketAddr::from(([127, 0, 0, 1], 0)), &stop).unwrap();
+        let port = prepared.listener.local_addr().unwrap().port();
+        let flag = Arc::clone(&stop);
+        let chosen = chosen.to_string();
+        let server = thread::spawn(move || serve_prepared(prepared, &chosen, flag));
         (port, stop, server)
     }
 
