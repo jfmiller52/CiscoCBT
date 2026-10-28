@@ -1,0 +1,5 @@
+[application]
+name = "IOS-XE Bench"
+
+[bundle]
+identifier = "com.ciscoconfig.bench"

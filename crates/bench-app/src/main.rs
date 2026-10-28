@@ -1,25 +1,50 @@
+mod awake;
+mod nic;
+mod serial;
+mod tftp;
 mod view;
+mod worker;
 
 use std::path::Path;
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bench_core::{release_heading, reminder_line, status_label, CheckStatus};
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 use view::{screen_for, Screen, UiCommand, ViewState};
 
 const STYLE: &str = include_str!("../assets/app.css");
+const WORKER_GONE: &str =
+    "The part of this program that talks to the device has stopped. Quit the program and open it again.";
 
 fn main() {
     let (commands, receiver) = mpsc::channel();
-    drop(receiver);
-    open_window(commands, ViewState::new());
+    let (updates, worker_updates) = unbounded_channel();
+    worker::spawn(receiver, move |view| {
+        // Once the window has closed there is no one left to tell.
+        let _ = updates.send(view);
+    });
+    let mut initial = ViewState::new();
+    initial.serial_devices = serial::serial_devices();
+    initial.ethernet_ports = nic::ethernet_ports();
+    open_window(commands, initial, worker_updates);
 }
 
-/// Opens the bench window on `initial` and sends the technician's commands on `commands`.
-fn open_window(commands: Sender<UiCommand>, initial: ViewState) {
+/// The worker's updates, which the root component takes once.
+#[derive(Clone)]
+struct WorkerUpdates(Arc<Mutex<Option<UnboundedReceiver<ViewState>>>>);
+
+/// Opens the bench window on `initial`, sends the technician's commands on
+/// `commands`, and shows each state that arrives on `updates`.
+fn open_window(
+    commands: Sender<UiCommand>,
+    initial: ViewState,
+    updates: UnboundedReceiver<ViewState>,
+) {
     LaunchBuilder::desktop()
         .with_cfg(
             Config::new()
@@ -33,12 +58,49 @@ fn open_window(commands: Sender<UiCommand>, initial: ViewState) {
         )
         .with_context(commands)
         .with_context(initial)
+        .with_context(WorkerUpdates(Arc::new(Mutex::new(Some(updates)))))
         .launch(App);
+}
+
+/// Takes the worker's state into the window, keeping the technician's own
+/// form and an export that has not been saved yet.
+fn merge_update(window: &mut ViewState, mut update: ViewState) {
+    update.form = std::mem::take(&mut window.form);
+    if update.export_text.is_none() {
+        update.export_text = window.export_text.take();
+    }
+    *window = update;
+}
+
+/// Sends `command` to the worker and returns whether it went. When the
+/// worker has gone, the stop banner says so.
+fn send(commands: &Sender<UiCommand>, mut state: Signal<ViewState>, command: UiCommand) -> bool {
+    let sent = commands.send(command).is_ok();
+    if !sent {
+        state.write().stop_reason = Some(WORKER_GONE.into());
+    }
+    sent
 }
 
 #[component]
 fn App() -> Element {
-    let state = use_signal(consume_context::<ViewState>);
+    let mut state = use_signal(consume_context::<ViewState>);
+    use_hook(|| {
+        let updates = consume_context::<WorkerUpdates>()
+            .0
+            .lock()
+            .map(|mut slot| slot.take())
+            .unwrap_or_default();
+        spawn(async move {
+            let Some(mut updates) = updates else {
+                return;
+            };
+            while let Some(update) = updates.recv().await {
+                merge_update(&mut state.write(), update);
+            }
+            state.write().stop_reason = Some(WORKER_GONE.into());
+        })
+    });
     let mut console_open = use_signal(|| false);
     let mut export_pending = use_signal(|| false);
     let mut export_note = use_signal(|| None::<String>);
@@ -292,7 +354,7 @@ fn StartFormScreen(mut state: Signal<ViewState>) -> Element {
                         match options {
                             Ok(options) => {
                                 error.set(None);
-                                let _ = commands.send(UiCommand::Start(options));
+                                send(&commands, state, UiCommand::Start(options));
                             }
                             Err(message) => error.set(Some(message)),
                         }
@@ -411,7 +473,7 @@ fn CablePrompt(state: Signal<ViewState>) -> Element {
                 class: "button primary",
                 disabled: view.tftp_port.is_none(),
                 onclick: move |_| {
-                    let _ = commands.send(UiCommand::ConfirmCable);
+                    send(&commands, state, UiCommand::ConfirmCable);
                 },
                 "Cable is in"
             }
@@ -456,7 +518,7 @@ fn PortWalk(state: Signal<ViewState>) -> Element {
             button {
                 class: "button primary",
                 onclick: move |_| {
-                    let _ = commands.send(UiCommand::CheckPort(port.clone()));
+                    send(&commands, state, UiCommand::CheckPort(port.clone()));
                 },
                 "Check this port"
             }
@@ -564,7 +626,9 @@ fn RecordScreen(
                         export_pending.set(true);
                         export_note.set(None);
                         state.write().export_text = None;
-                        let _ = commands.send(UiCommand::Export);
+                        if !send(&commands, state, UiCommand::Export) {
+                            export_pending.set(false);
+                        }
                     },
                     "Export validation"
                 }
@@ -657,6 +721,38 @@ fn remaining_text(left: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_worker_update_keeps_the_form_and_takes_everything_else() {
+        let mut window = ViewState::new();
+        window.form.serial_device = "/dev/cu.usbserial-1420".into();
+        window.form.port_testing = true;
+        let mut update = ViewState::new();
+        update.phase = Some(bench_core::Phase::Login);
+        update.transcript = "\r\nSwitch>".into();
+        update.stop_reason = Some("The device did not respond.".into());
+        merge_update(&mut window, update);
+        assert_eq!(window.form.serial_device, "/dev/cu.usbserial-1420");
+        assert!(window.form.port_testing);
+        assert_eq!(window.phase, Some(bench_core::Phase::Login));
+        assert_eq!(window.transcript, "\r\nSwitch>");
+        assert_eq!(
+            window.stop_reason.as_deref(),
+            Some("The device did not respond.")
+        );
+    }
+
+    #[test]
+    fn an_unsaved_export_survives_updates_without_one_and_a_new_one_replaces_it() {
+        let mut window = ViewState::new();
+        window.export_text = Some("first".into());
+        merge_update(&mut window, ViewState::new());
+        assert_eq!(window.export_text.as_deref(), Some("first"));
+        let mut update = ViewState::new();
+        update.export_text = Some("second".into());
+        merge_update(&mut window, update);
+        assert_eq!(window.export_text.as_deref(), Some("second"));
+    }
 
     #[test]
     fn remaining_time_rounds_up_to_the_minute() {
