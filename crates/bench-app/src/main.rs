@@ -22,6 +22,9 @@ const WORKER_GONE: &str =
     "The part of this program that talks to the device has stopped. Quit the program and open it again.";
 
 fn main() {
+    if let Some(code) = tftp::elevated_main() {
+        std::process::exit(code);
+    }
     let (commands, receiver) = mpsc::channel();
     let (updates, worker_updates) = unbounded_channel();
     worker::spawn(receiver, move |view| {

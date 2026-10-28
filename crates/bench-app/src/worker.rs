@@ -4,18 +4,13 @@
 use std::cell::RefCell;
 use std::fs;
 use std::io;
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
-use bench_core::{
-    export_text, server_address, CheckStatus, Console, Phase, RunFiles, RunOptions, Runner, Session,
-};
+use bench_core::{export_text, CheckStatus, Console, Phase, RunFiles, RunOptions, Runner, Session};
 
 use crate::awake::KeepAwake;
 use crate::file_name;
@@ -26,7 +21,6 @@ use crate::view::{UiCommand, ViewState};
 
 const MINUTE: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(60 * 60);
-const TFTP_PORT: u16 = 69;
 
 /// Starts the thread that carries out each `Start` on the device. It sends
 /// `updates` a whole `ViewState` whenever the run changes.
@@ -169,12 +163,9 @@ struct Run {
     port_error: Option<String>,
 }
 
-/// The TFTP server for one image copy.
+/// The elevated TFTP server for one image copy. It binds UDP 69.
 struct Tftp {
-    stop: Arc<AtomicBool>,
-    server: JoinHandle<io::Result<u64>>,
-    /// The port that was given the server address for this copy.
-    address_on: Option<String>,
+    server: nic::ImageServer,
 }
 
 impl Run {
@@ -275,49 +266,34 @@ impl Run {
     fn start_tftp(&mut self) -> Option<Tftp> {
         let firmware = self.options.firmware.as_ref()?;
         let port = firmware.local_ethernet.clone();
-        if !claim_laptop_address(&mut self.runner, &port) {
-            return None;
-        }
         let path = PathBuf::from(&firmware.image_path);
         let chosen = file_name(&firmware.image_path);
-        let address = server_address()
-            .parse()
-            .expect("the server address is an IP address");
-        let bind = SocketAddr::new(address, TFTP_PORT);
-        let Some(bound) = bind_tftp_or_abort(&mut self.runner, &path, &chosen, bind) else {
-            self.remove_server_address(&port);
-            return None;
+        let server = match nic::spawn_image_server(&port, &path, &chosen) {
+            Ok(server) => server,
+            Err(err) => {
+                let failure = if err.kind() == io::ErrorKind::InvalidInput {
+                    nic::StartFailure::Address(err.to_string())
+                } else {
+                    nic::StartFailure::Bind(err.to_string())
+                };
+                abort_image_start(&mut self.runner, failure);
+                return None;
+            }
         };
-        Some(Tftp {
-            stop: bound.stop,
-            server: bound.server,
-            address_on: Some(port),
-        })
+        match server.wait_until_listening() {
+            Ok(()) => Some(Tftp { server }),
+            Err(failure) => {
+                let _ = server.finish();
+                abort_image_start(&mut self.runner, failure);
+                None
+            }
+        }
     }
 
     fn finish_tftp(&mut self, tftp: Tftp) {
-        tftp.stop.store(true, Ordering::SeqCst);
-        match tftp.server.join() {
-            Ok(Ok(_)) => {}
-            Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => {}
-            Ok(Err(err)) => self
-                .notes
-                .push(format!("The TFTP server on this computer failed: {err}")),
-            Err(_) => self
-                .notes
-                .push("The TFTP server on this computer stopped unexpectedly.".into()),
-        }
-        if let Some(port) = tftp.address_on {
-            self.remove_server_address(&port);
-        }
-    }
-
-    fn remove_server_address(&mut self, port: &str) {
-        if let Err(err) = nic::remove_server_address(port) {
-            self.notes.push(format!(
-                "The address {} could not be removed from {port}: {err}",
-                server_address()
-            ));
+        if let Err(err) = tftp.server.finish() {
+            self.notes
+                .push(format!("The TFTP server on this computer failed: {err}"));
         }
     }
 
@@ -348,13 +324,30 @@ impl Run {
     }
 }
 
+#[cfg(test)]
 struct BoundServer {
-    stop: Arc<AtomicBool>,
-    server: JoinHandle<io::Result<u64>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server: std::thread::JoinHandle<io::Result<u64>>,
+}
+
+fn abort_image_start<C: Console>(runner: &mut Runner<C>, failure: nic::StartFailure) {
+    let reason = match failure {
+        nic::StartFailure::Address(detail) => {
+            format!("The laptop address for the image copy could not be set: {detail}")
+        }
+        nic::StartFailure::Bind(detail) => {
+            format!(
+                "The TFTP server could not start on {}: {detail}",
+                tftp::device_bind()
+            )
+        }
+    };
+    runner.abort(&reason);
 }
 
 /// Puts the server address on `port`. Aborts the run when that cannot be
 /// done. Returns whether the address is in place.
+#[cfg(test)]
 fn claim_laptop_address<C: Console>(runner: &mut Runner<C>, port: &str) -> bool {
     match nic::add_server_address(port) {
         Ok(()) => true,
@@ -367,17 +360,19 @@ fn claim_laptop_address<C: Console>(runner: &mut Runner<C>, port: &str) -> bool 
     }
 }
 
-/// Binds the TFTP server and leaves it waiting for the device. Aborts the
+/// Binds `bind` in this process and leaves the server waiting. Aborts the
 /// run when the image cannot be opened or the socket cannot be bound.
-/// Returns only once the socket is bound, so the caller can start the
-/// console copy.
+/// The device copy does not use this: UDP 69 is bound by the elevated helper.
+/// Tests use an ephemeral port.
+#[cfg(test)]
 fn bind_tftp_or_abort<C: Console>(
     runner: &mut Runner<C>,
-    path: &Path,
+    path: &std::path::Path,
     chosen: &str,
-    bind: SocketAddr,
+    bind: std::net::SocketAddr,
 ) -> Option<BoundServer> {
-    let stop = Arc::new(AtomicBool::new(false));
+    use std::sync::Arc;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let prepared = match tftp::prepare(path, bind, &stop) {
         Ok(prepared) => prepared,
         Err(err) => {
@@ -402,6 +397,8 @@ fn current_port(ports: &[(String, CheckStatus)]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc;
 
     use bench_core::ScriptedConsole;
@@ -532,6 +529,22 @@ mod tests {
         let reason = runner.stop_reason().unwrap();
         let expected = format!("The TFTP server could not start on {bind}:");
         assert!(reason.starts_with(&expected), "{reason}");
+        assert!(runner.session().console().written().is_empty());
+    }
+
+    #[test]
+    fn a_privileged_bind_failure_aborts_on_the_device_port() {
+        let mut runner = scripted_runner();
+        abort_image_start(
+            &mut runner,
+            nic::StartFailure::Bind("Address not available".into()),
+        );
+        assert_eq!(runner.phase(), Phase::Stopped);
+        let reason = runner.stop_reason().unwrap();
+        assert!(
+            reason.starts_with("The TFTP server could not start on 192.0.2.1:69:"),
+            "{reason}"
+        );
         assert!(runner.session().console().written().is_empty());
     }
 

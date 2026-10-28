@@ -1,10 +1,10 @@
 //! Serves the firmware image to the device over TFTP (RFC 1350, with the
 //! block size option of RFC 2348).
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufReader, Read};
 use std::net::{SocketAddr, UdpSocket};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use bench_core::{
     block_count, data_packet, error_packet, negotiated_blksize, oack_packet, parse_ack, parse_rrq,
-    serves, wire_block,
+    server_address, serves, wire_block,
 };
 
 /// How often a wait checks whether it has been told to stop.
@@ -20,6 +20,18 @@ const POLL: Duration = Duration::from_millis(200);
 const RETRANSMIT: Duration = Duration::from_secs(1);
 const TRIES: u32 = 5;
 const READ_BUFFER: usize = 64 * 1024;
+/// Duplicate-address detection finishes in a few seconds. Longer than this,
+/// the new address is not coming up.
+const BIND_WAIT: Duration = Duration::from_secs(15);
+
+/// UDP 69 at the server address. The device copy URL has no port, and 69 is
+/// privileged, so only the elevated helper binds it.
+pub fn device_bind() -> SocketAddr {
+    let ip = server_address()
+        .parse()
+        .expect("the server address is an IP address");
+    SocketAddr::new(ip, 69)
+}
 
 /// The image file and a socket already bound to the server address.
 pub struct Prepared {
@@ -29,17 +41,133 @@ pub struct Prepared {
 }
 
 /// Opens `path` and binds `bind`. Retries while the address is not assigned
-/// yet. Returns only once the socket is bound, so the caller can start the
-/// device copy after this succeeds.
+/// yet, for a few seconds, then gives up. Returns only once the socket is
+/// bound, so the caller can start the device copy after this succeeds.
 pub fn prepare(path: &Path, bind: SocketAddr, stop: &AtomicBool) -> io::Result<Prepared> {
     let file = File::open(path)?;
     let size = file.metadata()?.len();
-    let listener = bind_when_available(bind, stop)?;
+    let listener = bind_when_available(bind, stop, BIND_WAIT, bind_udp)?;
     Ok(Prepared {
         file,
         size,
         listener,
     })
+}
+
+/// Runs inside the elevated helper. Adds the laptop address, binds `bind`,
+/// and serves until `job/stop` appears. Removes the address again on the
+/// way out, including when the bind gives up.
+pub fn run_server_job(bind: SocketAddr, job: &Path) -> io::Result<()> {
+    let port = job_text(job.join("port"))?;
+    let image = job_text(job.join("image"))?;
+    let chosen = job_text(job.join("chosen"))?;
+    if let Err(err) = crate::nic::apply_server_address(&port) {
+        write_failure(job, "address", &err);
+        return Err(err);
+    }
+    let watch = StopWatch::start(job.join("stop"));
+    let stop = Arc::clone(watch.flag());
+    let _added = AddedAddress { port: &port };
+    let prepared = match prepare(Path::new(&image), bind, &stop) {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            write_failure(job, "bind", &err);
+            return Err(err);
+        }
+    };
+    fs::write(job.join("ready"), b"")?;
+    let served = serve_prepared(prepared, &chosen, stop);
+    match served {
+        Err(err) if err.kind() == io::ErrorKind::Interrupted => Ok(()),
+        other => other.map(|_| ()),
+    }
+}
+
+/// The process entry for `--tftp-serve <bind> <job>`. `None` when those are
+/// not the arguments, so the window can start.
+pub fn elevated_main() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) != Some("--tftp-serve") {
+        return None;
+    }
+    let code = match parse_serve_args(&args).and_then(|(bind, job)| run_server_job(bind, &job)) {
+        Ok(()) => 0,
+        Err(err) => {
+            eprintln!("{err}");
+            1
+        }
+    };
+    Some(code)
+}
+
+fn parse_serve_args(args: &[String]) -> io::Result<(SocketAddr, PathBuf)> {
+    if args.len() != 3 {
+        return Err(io::Error::other(
+            "usage: --tftp-serve <bind-address> <job-directory>",
+        ));
+    }
+    let bind = args[1]
+        .parse()
+        .map_err(|_| io::Error::other(format!("{} is not the socket address to bind", args[1])))?;
+    Ok((bind, PathBuf::from(&args[2])))
+}
+
+fn job_text(path: PathBuf) -> io::Result<String> {
+    Ok(fs::read_to_string(path)?.trim().to_string())
+}
+
+fn write_failure(job: &Path, kind: &str, err: &io::Error) {
+    let _ = fs::write(job.join("error"), format!("{kind}\n{err}"));
+}
+
+/// Removes the address this job added, when the server stops or the bind fails.
+struct AddedAddress<'a> {
+    port: &'a str,
+}
+
+impl Drop for AddedAddress<'_> {
+    fn drop(&mut self) {
+        let _ = crate::nic::release_server_address(self.port);
+    }
+}
+
+/// Sets the stop flag when the parent creates the stop file.
+struct StopWatch {
+    stop: Arc<AtomicBool>,
+    watcher: Option<thread::JoinHandle<()>>,
+}
+
+impl StopWatch {
+    fn start(path: PathBuf) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let watcher = thread::spawn(move || {
+            while !flag.load(Ordering::SeqCst) {
+                if path.exists() {
+                    flag.store(true, Ordering::SeqCst);
+                    return;
+                }
+                thread::sleep(POLL);
+            }
+        });
+        Self {
+            stop,
+            watcher: Some(watcher),
+        }
+    }
+
+    fn flag(&self) -> &Arc<AtomicBool> {
+        &self.stop
+    }
+}
+
+impl Drop for StopWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(watcher) = self.watcher.take() {
+            let _ = watcher.join();
+        }
+    }
 }
 
 /// Serves one read of `chosen` on a socket from [`prepare`] and returns the
@@ -76,14 +204,31 @@ pub fn serve_prepared(prepared: Prepared, chosen: &str, stop: Arc<AtomicBool>) -
     }
 }
 
-/// Windows can use a newly added address only once duplicate address
-/// detection has finished and the link is up.
-fn bind_when_available(bind: SocketAddr, stop: &AtomicBool) -> io::Result<UdpSocket> {
+/// Windows can use a newly added address only once duplicate-address
+/// detection has finished and the link is up. That wait is bounded: past
+/// `wait`, the address is not coming up and the bind has failed.
+fn bind_udp(bind: &SocketAddr) -> io::Result<UdpSocket> {
+    UdpSocket::bind(bind)
+}
+
+fn bind_when_available(
+    bind: SocketAddr,
+    stop: &AtomicBool,
+    wait: Duration,
+    bind_socket: impl Fn(&SocketAddr) -> io::Result<UdpSocket>,
+) -> io::Result<UdpSocket> {
+    let deadline = Instant::now() + wait;
     loop {
-        match UdpSocket::bind(bind) {
+        match bind_socket(&bind) {
             Err(err) if err.kind() == io::ErrorKind::AddrNotAvailable => {
                 check(stop)?;
-                thread::sleep(POLL);
+                if Instant::now() >= deadline {
+                    return Err(err);
+                }
+                let pause = POLL.min(deadline.saturating_duration_since(Instant::now()));
+                if !pause.is_zero() {
+                    thread::sleep(pause);
+                }
             }
             bound => return bound,
         }
@@ -172,7 +317,53 @@ fn is_idle(err: &io::Error) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
     use std::thread::JoinHandle;
+
+    #[test]
+    fn the_device_listens_on_udp_69() {
+        assert_eq!(device_bind().to_string(), "192.0.2.1:69");
+    }
+
+    #[test]
+    fn an_address_that_never_appears_stops_the_bind_wait() {
+        let bind = "192.0.2.1:69".parse().unwrap();
+        let stop = AtomicBool::new(false);
+        let calls = AtomicUsize::new(0);
+        let started = Instant::now();
+        let err = bind_when_available(bind, &stop, Duration::from_millis(400), |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "Can't assign requested address",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AddrNotAvailable);
+        assert!(calls.load(Ordering::SeqCst) >= 2);
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(350), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    }
+
+    #[test]
+    fn a_refused_bind_returns_without_waiting() {
+        let bind = "192.0.2.1:69".parse().unwrap();
+        let stop = AtomicBool::new(false);
+        let calls = AtomicUsize::new(0);
+        let started = Instant::now();
+        let err = bind_when_available(bind, &stop, Duration::from_secs(30), |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Permission denied",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     type Server = (u16, Arc<AtomicBool>, JoinHandle<io::Result<u64>>);
 
