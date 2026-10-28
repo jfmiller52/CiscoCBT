@@ -6,11 +6,17 @@ edition = "2021"
 [dependencies]
 bench-core = { path = "../bench-core" }
 dioxus = { version = "0.6", features = ["desktop"] }
-netdev = { version = "0.47", default-features = false, features = ["apple-system-configuration-extra"] }
 regex = "1.13.1"
 rfd = { version = "0.14", default-features = false, features = ["xdg-portal", "tokio"] }
 serialport = { version = "4.10", default-features = false }
 tokio = { version = "1", features = ["sync"] }
+
+# SCPreferences helpers are Apple-only; Windows/Linux keep the default netdev surface.
+[target.'cfg(target_os = "macos")'.dependencies]
+netdev = { version = "0.47", default-features = false, features = ["apple-system-configuration-extra"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+netdev = { version = "0.47", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

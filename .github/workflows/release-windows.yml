@@ -1,0 +1,50 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to attach the Windows build to (e.g. v1.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      # Tag pushes build that tag. Manual runs build the selected branch (usually
+      # main) so Cargo/Windows fixes land even when attaching to an older tag.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release -p bench-app
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/bench-app.exe dist/Cisco-CBT-App-windows-x64.exe
+          cd dist
+          7z a -tzip Cisco-CBT-App-windows-x64.zip Cisco-CBT-App-windows-x64.exe
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          files: dist/Cisco-CBT-App-windows-x64.zip
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
