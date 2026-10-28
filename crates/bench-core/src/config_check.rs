@@ -79,9 +79,11 @@ pub fn missing_commands(uploaded: &str, running: &str) -> Vec<String> {
 }
 
 /// A top-level command and the indented lines that follow it.
+/// `literal` is a banner body: those lines are text, including `!` lines.
 struct Entry {
     header: Line,
     children: Vec<Line>,
+    literal: bool,
 }
 
 struct Line {
@@ -91,11 +93,25 @@ struct Line {
 
 fn parse(text: &str) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
+    let mut banner: Option<String> = None;
     for raw in text.lines() {
+        if let Some(delimiter) = &banner {
+            if let Some(entry) = entries.last_mut() {
+                entry.children.push(Line {
+                    original: raw.to_string(),
+                    normalized: normalize(raw),
+                });
+            }
+            if raw.contains(delimiter.as_str()) {
+                banner = None;
+            }
+            continue;
+        }
         let normalized = normalize(raw);
         if is_ignored(&normalized) {
             continue;
         }
+        let opened = open_banner(&normalized);
         let line = Line {
             original: raw.to_string(),
             normalized,
@@ -103,10 +119,15 @@ fn parse(text: &str) -> Vec<Entry> {
         let indented = raw.starts_with(char::is_whitespace);
         match entries.last_mut() {
             Some(entry) if indented => entry.children.push(line),
-            _ => entries.push(Entry {
-                header: line,
-                children: Vec::new(),
-            }),
+            _ => {
+                let literal = opened.is_some();
+                banner = opened;
+                entries.push(Entry {
+                    header: line,
+                    children: Vec::new(),
+                    literal,
+                });
+            }
         }
     }
     entries
@@ -114,7 +135,63 @@ fn parse(text: &str) -> Vec<Entry> {
 
 fn normalize(line: &str) -> String {
     let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    canonical_interface_name(&collapsed)
+    let joined = join_spaced_interface_ids(&collapsed);
+    canonical_interface_name(&joined)
+}
+
+/// `interface vlan 10` is the same interface as `Vlan10`. Only interface
+/// headers join a type word to the number that follows it.
+fn join_spaced_interface_ids(line: &str) -> String {
+    let mut words = line.split(' ');
+    if !words
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("interface"))
+    {
+        return line.to_string();
+    }
+    let words: Vec<&str> = line.split(' ').collect();
+    let mut out = Vec::with_capacity(words.len());
+    let mut index = 0;
+    while index < words.len() {
+        if index + 1 < words.len()
+            && is_spaced_interface_type(words[index])
+            && words[index + 1].starts_with(|c: char| c.is_ascii_digit())
+        {
+            out.push(format!("{}{}", words[index], words[index + 1]));
+            index += 2;
+            continue;
+        }
+        out.push(words[index].to_string());
+        index += 1;
+    }
+    out.join(" ")
+}
+
+fn is_spaced_interface_type(word: &str) -> bool {
+    !word.chars().any(|c| c.is_ascii_digit()) && full_interface_name(word).is_some()
+}
+
+/// The delimiter of a `banner` command whose body continues on later lines.
+/// `^C` is the two characters `^` and `C`. A delimiter that already closes on
+/// this line leaves no body.
+fn open_banner(line: &str) -> Option<String> {
+    let (word, rest) = line.split_once(char::is_whitespace)?;
+    if !word.eq_ignore_ascii_case("banner") {
+        return None;
+    }
+    let (_kind, rest) = rest.trim_start().split_once(char::is_whitespace)?;
+    let text = rest.trim_start();
+    let width = if text.starts_with("^C") {
+        2
+    } else {
+        text.chars().next()?.len_utf8()
+    };
+    let (delimiter, after) = text.split_at(width);
+    if after.contains(delimiter) {
+        None
+    } else {
+        Some(delimiter.to_string())
+    }
 }
 
 fn is_ignored(normalized: &str) -> bool {
@@ -151,10 +228,16 @@ fn check_entry(entry: &Entry, running: &[Entry], missing: &mut Vec<String>) {
     }
     let sections: Vec<Vec<&str>> = targets.iter().map(|t| section_lines(running, t)).collect();
     for child in &entry.children {
-        if !sections
-            .iter()
-            .all(|lines| is_present(&child.normalized, lines))
-        {
+        let present = if entry.literal {
+            sections
+                .iter()
+                .all(|lines| lines.contains(&child.normalized.as_str()))
+        } else {
+            sections
+                .iter()
+                .all(|lines| is_present(&child.normalized, lines))
+        };
+        if !present {
             missing.push(child.original.clone());
         }
     }
@@ -181,20 +264,43 @@ fn range_headers(header: &str) -> Option<Vec<String>> {
     Some(headers)
 }
 
-/// `GigabitEthernet1/0/1 - 2` -> `[...1/0/1, ...1/0/2]`; the hyphen applies to
-/// the last number of the name. `None` when the item is not a range.
+/// `GigabitEthernet1/0/1 - 2` and `GigabitEthernet1/0/1 - GigabitEthernet1/0/3`
+/// expand on the last number. `None` when the item is not a range.
 fn expand_range_item(item: &str) -> Option<Vec<String>> {
-    let (left, right) = item.rsplit_once('-')?;
+    let (left, right) = split_range(item)?;
     let (left, right) = (left.trim(), right.trim());
-    if right.is_empty() || !right.bytes().all(|b| b.is_ascii_digit()) {
+    if right.is_empty() {
         return None;
     }
-    let digits = left.len() - left.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    if right.bytes().all(|b| b.is_ascii_digit()) {
+        let (prefix, first) = split_last_number(left)?;
+        return expand_span(prefix, first, right.parse().ok()?);
+    }
+    let (prefix, first) = split_last_number(left)?;
+    let (prefix_right, last) = split_last_number(right)?;
+    if prefix != prefix_right {
+        return None;
+    }
+    expand_span(prefix, first, last)
+}
+
+fn split_range(item: &str) -> Option<(&str, &str)> {
+    if let Some((left, right)) = item.split_once(" - ") {
+        return Some((left, right));
+    }
+    item.rsplit_once('-')
+}
+
+fn split_last_number(name: &str) -> Option<(&str, u32)> {
+    let digits = name.len() - name.trim_end_matches(|c: char| c.is_ascii_digit()).len();
     if digits == 0 {
         return None;
     }
-    let (prefix, first) = left.split_at(left.len() - digits);
-    let (first, last): (u32, u32) = (first.parse().ok()?, right.parse().ok()?);
+    let (prefix, number) = name.split_at(name.len() - digits);
+    Some((prefix, number.parse().ok()?))
+}
+
+fn expand_span(prefix: &str, first: u32, last: u32) -> Option<Vec<String>> {
     if last < first || last - first >= MAX_RANGE_MEMBERS {
         return None;
     }
@@ -554,6 +660,53 @@ end
         assert!(missing(file, without).is_empty());
         let shut = "interface GigabitEthernet1/0/1\n switchport mode access\n";
         assert!(missing("interface Gi1/0/1\n no shutdown\n", shut).is_empty());
+    }
+
+    #[test]
+    fn interface_vlan_and_ranges_match_the_stored_names() {
+        let file = "\
+interface vlan 10
+ ip address 10.1.10.1 255.255.255.0
+interface range Gi1/0/1 - Gi1/0/3
+ switchport mode access
+interface range vlan 10 - 20
+ no shutdown
+";
+        let mut running = String::from(
+            "\
+interface Vlan10
+ ip address 10.1.10.1 255.255.255.0
+",
+        );
+        for n in 1..=3 {
+            running.push_str(&format!(
+                "interface GigabitEthernet1/0/{n}\n switchport mode access\n"
+            ));
+        }
+        for n in 10..=20 {
+            running.push_str(&format!("interface Vlan{n}\n no shutdown\n"));
+        }
+        assert!(
+            missing(file, &running).is_empty(),
+            "{:?}",
+            missing(file, &running)
+        );
+    }
+
+    #[test]
+    fn a_bang_inside_a_banner_is_banner_text() {
+        let file = "!\nbanner motd ^C\nno shutdown\n! keep this\n^C\nhostname sw1\n";
+        let running = "banner motd ^C\nno shutdown\n! keep this\n^C\nhostname sw1\n";
+        assert!(missing(file, running).is_empty());
+        let dropped = "banner motd ^C\nno shutdown\n^C\nhostname sw1\n";
+        assert_eq!(missing(file, dropped), vec!["! keep this".to_string()]);
+        assert_eq!(
+            missing(
+                "banner motd ^C\nHello\n^C\nhostname sw1\n",
+                "banner motd ^C\nHello\n^C\n"
+            ),
+            vec!["hostname sw1".to_string()]
+        );
     }
 
     #[test]

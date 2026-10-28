@@ -34,22 +34,38 @@ pub enum LoginAction {
     InPrivileged { reminder: Option<FactorySecrets> },
 }
 
+/// Which secret the device is asking for. A `Password:` prompt after `enable`
+/// asks for the enable secret, not the account password.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asking {
+    Password,
+    Enable,
+}
+
 /// Logs into a factory-fresh device, creating the account and enable secret
-/// when the device asks for them.
+/// when the device asks for them. The account password and the enable secret
+/// are remembered separately, because the device can accept one and reject
+/// the other.
 #[derive(Debug)]
 pub struct FactoryLogin {
-    secret: &'static str,
+    password: &'static str,
+    enable_secret: &'static str,
     saw_username_prompt: bool,
     saw_account_prompt: bool,
+    asking: Asking,
+    after_enable: bool,
     stopped: Option<LoginAction>,
 }
 
 impl FactoryLogin {
     pub fn new() -> Self {
         Self {
-            secret: FACTORY_SECRET,
+            password: FACTORY_SECRET,
+            enable_secret: FACTORY_SECRET,
             saw_username_prompt: false,
             saw_account_prompt: false,
+            asking: Asking::Password,
+            after_enable: false,
             stopped: None,
         }
     }
@@ -65,16 +81,37 @@ impl FactoryLogin {
                 self.saw_account_prompt = true;
                 LoginAction::Send(FACTORY_SECRET)
             }
-            LoginEvent::PasswordPrompt
-            | LoginEvent::ConfirmPassword
-            | LoginEvent::EnableSecretPrompt => {
+            LoginEvent::PasswordPrompt => {
                 self.saw_account_prompt = true;
-                LoginAction::Send(self.secret)
+                if self.after_enable {
+                    LoginAction::Send(self.enable_secret)
+                } else {
+                    self.asking = Asking::Password;
+                    LoginAction::Send(self.password)
+                }
             }
-            LoginEvent::UserExec => LoginAction::Send("enable"),
+            LoginEvent::ConfirmPassword => {
+                self.saw_account_prompt = true;
+                LoginAction::Send(self.current_secret())
+            }
+            LoginEvent::EnableSecretPrompt => {
+                self.saw_account_prompt = true;
+                self.asking = Asking::Enable;
+                LoginAction::Send(self.enable_secret)
+            }
+            LoginEvent::UserExec => {
+                self.after_enable = true;
+                LoginAction::Send("enable")
+            }
             LoginEvent::Rejected { too_short, raw } => {
-                if too_short && self.secret == FACTORY_SECRET {
-                    self.secret = FALLBACK_SECRET;
+                if too_short && self.current_secret() == FACTORY_SECRET {
+                    if self.asking == Asking::Enable || self.after_enable {
+                        self.enable_secret = FALLBACK_SECRET;
+                    } else {
+                        // A short account password is retried for both fields.
+                        self.password = FALLBACK_SECRET;
+                        self.enable_secret = FALLBACK_SECRET;
+                    }
                     LoginAction::Wait
                 } else {
                     self.stop(format!("device rejected the password: {raw}"))
@@ -87,10 +124,18 @@ impl FactoryLogin {
                     } else {
                         String::new()
                     },
-                    password: self.secret.to_string(),
-                    enable_secret: self.secret.to_string(),
+                    password: self.password.to_string(),
+                    enable_secret: self.enable_secret.to_string(),
                 }),
             },
+        }
+    }
+
+    fn current_secret(&self) -> &'static str {
+        if self.asking == Asking::Enable || self.after_enable {
+            self.enable_secret
+        } else {
+            self.password
         }
     }
 
@@ -317,6 +362,31 @@ fn lines_of(entries: &[&Entry<'_>]) -> Vec<String> {
     entries.iter().map(|e| e.line.to_string()).collect()
 }
 
+/// The last enable secret wins on the device. When that line is a hash and an
+/// earlier enable secret or enable password was typable, stop instead of
+/// reusing the earlier value.
+fn hashed_enable_after_typable(entries: &[Entry<'_>]) -> Option<String> {
+    let mut saw_typable_enable = false;
+    let mut blocking = None;
+    for entry in entries {
+        match entry.kind {
+            Kind::EnableSecret => {
+                if entry.value.is_none() {
+                    if saw_typable_enable {
+                        blocking = Some(entry.line.to_string());
+                    }
+                } else {
+                    saw_typable_enable = true;
+                    blocking = None;
+                }
+            }
+            Kind::EnablePassword if entry.value.is_some() => saw_typable_enable = true,
+            _ => {}
+        }
+    }
+    blocking
+}
+
 /// Decides how to log in after the technician's file has been applied and
 /// saved, or stops before the reboot when the console would be unreachable.
 pub fn login_after_apply(uploaded: &str, factory: &FactorySecrets) -> NextLogin {
@@ -351,6 +421,9 @@ pub fn login_after_apply(uploaded: &str, factory: &FactorySecrets) -> NextLogin 
     match admins.as_slice() {
         [] => {}
         [admin] => {
+            if let Some(line) = hashed_enable_after_typable(&entries) {
+                return NextLogin::Stop { lines: vec![line] };
+            }
             let username = admin
                 .line
                 .split_whitespace()
@@ -438,6 +511,60 @@ mod tests {
             } => {
                 assert_eq!(secrets.username, "cisco");
                 assert_eq!(secrets.password, "Passw0rd%");
+                assert_eq!(secrets.enable_secret, "Passw0rd%");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_accepted_password_stays_when_only_the_enable_secret_is_too_short() {
+        let mut login = FactoryLogin::new();
+        assert_eq!(
+            login.on_event(LoginEvent::UsernamePrompt),
+            LoginAction::Send("cisco")
+        );
+        assert_eq!(
+            login.on_event(LoginEvent::PasswordPrompt),
+            LoginAction::Send("cisco")
+        );
+        assert_eq!(
+            login.on_event(LoginEvent::ConfirmPassword),
+            LoginAction::Send("cisco")
+        );
+        assert_eq!(
+            login.on_event(LoginEvent::EnableSecretPrompt),
+            LoginAction::Send("cisco")
+        );
+        assert_eq!(
+            login.on_event(LoginEvent::Rejected {
+                too_short: true,
+                raw: "% Password rejected. Too short.".into(),
+            }),
+            LoginAction::Wait
+        );
+        assert_eq!(
+            login.on_event(LoginEvent::EnableSecretPrompt),
+            LoginAction::Send("Passw0rd%")
+        );
+        assert_eq!(
+            login.on_event(LoginEvent::ConfirmPassword),
+            LoginAction::Send("Passw0rd%")
+        );
+        assert_eq!(
+            login.on_event(LoginEvent::UserExec),
+            LoginAction::Send("enable")
+        );
+        assert_eq!(
+            login.on_event(LoginEvent::PasswordPrompt),
+            LoginAction::Send("Passw0rd%")
+        );
+        match login.on_event(LoginEvent::Privileged) {
+            LoginAction::InPrivileged {
+                reminder: Some(secrets),
+            } => {
+                assert_eq!(secrets.username, "cisco");
+                assert_eq!(secrets.password, "cisco");
                 assert_eq!(secrets.enable_secret, "Passw0rd%");
             }
             other => panic!("unexpected {other:?}"),
@@ -700,6 +827,31 @@ mod tests {
             NextLogin::User { password, .. } => assert_eq!(password, "my pass word"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn hashed_enable_secret_after_a_typable_one_stops_before_reboot() {
+        let file =
+            "enable secret 0 Open\nenable secret 9 $9$abc\nusername a privilege 15 secret 0 One\n";
+        match login_after_apply(file, &factory()) {
+            NextLogin::Stop { lines } => {
+                assert_eq!(lines, vec!["enable secret 9 $9$abc".to_string()])
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let file = "enable password 0 Legacy\nenable secret 9 $9$abc\nusername a privilege 15 secret 0 One\n";
+        match login_after_apply(file, &factory()) {
+            NextLogin::Stop { lines } => {
+                assert_eq!(lines, vec!["enable secret 9 $9$abc".to_string()])
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let file =
+            "enable secret 9 $9$abc\nenable secret 0 Open\nusername a privilege 15 secret 0 One\n";
+        assert!(matches!(
+            login_after_apply(file, &factory()),
+            NextLogin::User { enable_secret, .. } if enable_secret == "Open"
+        ));
     }
 
     #[test]

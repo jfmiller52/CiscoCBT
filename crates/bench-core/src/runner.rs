@@ -70,6 +70,8 @@ pub struct Runner<C: Console> {
     tftp_port: Option<String>,
     ports: Vec<(String, CheckStatus)>,
     uptime_line: Option<String>,
+    /// `show version` text captured when the firmware check passed.
+    running_version: Option<String>,
     cable_confirmed: bool,
     wait_finished: bool,
     stop_reason: Option<String>,
@@ -102,6 +104,7 @@ impl<C: Console> Runner<C> {
             tftp_port: None,
             ports: Vec::new(),
             uptime_line: None,
+            running_version: None,
             cable_confirmed: false,
             wait_finished: false,
             stop_reason: None,
@@ -207,11 +210,7 @@ impl<C: Console> Runner<C> {
     }
 
     pub fn export_input(&self) -> ExportInput {
-        let running_version = if self.record.firmware == CheckStatus::Passed {
-            version_token(&self.image_name())
-        } else {
-            None
-        };
+        let running_version = self.running_version.clone();
         // The export prints no Ports section for an empty list.
         let ports = match &self.record.ports {
             CheckStatus::Failed { .. } if self.ports.is_empty() => {
@@ -327,6 +326,7 @@ impl<C: Console> Runner<C> {
         let version = self.session.exec("show version")?;
         let image = self.image_name();
         if firmware_check(&image, &version) == FirmwareCheck::Pass {
+            self.running_version = Some(version.trim().to_string());
             self.record.firmware = CheckStatus::Passed;
             self.send(PhaseEvent::VersionMatched);
         } else {
@@ -895,8 +895,41 @@ mod tests {
         );
         let input = runner.export_input();
         assert_eq!(input.firmware_file.as_deref(), Some(IMAGE));
-        assert_eq!(input.running_version.as_deref(), Some("17.12.05"));
+        assert_eq!(
+            input.running_version.as_deref(),
+            Some("Cisco IOS XE Software, Version 17.12.05\r\ncisco C9300-24T (X86) processor")
+        );
         assert_eq!(input.firmware, CheckStatus::Passed);
+    }
+
+    #[test]
+    fn a_trailing_letter_does_not_pass_and_a_pass_quotes_show_version() {
+        let short = "cat9k_iosxe.17.09.04.SPA.bin";
+        let show = "Cisco IOS XE Software, Version 17.09.04a";
+        let mut mismatched = runner(
+            options(Some(short), None, false),
+            BODY,
+            firmware_steps(short, show),
+        );
+        drive(&mut mismatched);
+        mismatched.confirm_cable();
+        assert_eq!(drive(&mut mismatched), Phase::Stopped);
+        assert!(matches!(
+            mismatched.record().firmware,
+            CheckStatus::Failed { .. }
+        ));
+        assert_eq!(mismatched.export_input().running_version, None);
+
+        let image = "cat9k_iosxe.17.09.04a.SPA.bin";
+        let mut passed = runner(
+            options(Some(image), None, false),
+            BODY,
+            firmware_steps(image, show),
+        );
+        drive(&mut passed);
+        passed.confirm_cable();
+        assert_eq!(drive(&mut passed), Phase::Done);
+        assert_eq!(passed.export_input().running_version.as_deref(), Some(show));
     }
 
     #[test]

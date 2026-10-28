@@ -65,8 +65,7 @@ const BAD_SECRETS: &str = r"(?im)^\s*%\s*bad secrets\b.*$";
 const TOO_SHORT: &str = r"(?i)too short|minimum|at least \d+";
 const LOGIN_REFUSED: &str =
     r"(?im)^\s*%\s*(login invalid|bad passwords|authentication failed|access denied).*$";
-const CONFIG_REJECTION: &str =
-    r"(?i)^\s*%\s*(invalid|incomplete|ambiguous|unknown|unrecognized|error|bad|cannot|not allowed)";
+const CONFIG_REJECTION: &str = r"(?i)^\s*%\s*(invalid|incomplete|ambiguous|unknown|unrecognized|error|bad|cannot|not allowed|command rejected)";
 const DESTINATION: &str = r"(?i)destination filename \[[^\]\n]*\]\?";
 const OVERWRITE: &str = r"(?i)do you want to over write\? \[confirm\]";
 const SAVE_QUESTION: &str = r"(?i)save\? \[yes/no\]";
@@ -331,13 +330,13 @@ impl<C: Console> Session<C> {
         )?;
         if let Some(line) = line_with(&output, &["%Error"]) {
             return Err(SessionError::Stopped(format!(
-                "Saving the configuration failed: {line}"
+                "Saving the configuration failed: {line}\n{output}"
             )));
         }
         if !output.contains("[OK]") {
-            return Err(SessionError::Stopped(
-                "Saving the configuration did not report [OK].".into(),
-            ));
+            return Err(SessionError::Stopped(format!(
+                "Saving the configuration did not report [OK].\n{output}"
+            )));
         }
         Ok(())
     }
@@ -365,13 +364,13 @@ impl<C: Console> Session<C> {
         )?;
         if let Some(line) = line_with(&output, &["%Error", "Error opening"]) {
             return Err(SessionError::Stopped(format!(
-                "The image copy failed: {line}"
+                "The image copy failed: {line}\n{output}"
             )));
         }
         if !output.contains("bytes copied") {
-            return Err(SessionError::Stopped(
-                "The image copy did not report bytes copied.".into(),
-            ));
+            return Err(SessionError::Stopped(format!(
+                "The image copy did not report bytes copied.\n{output}"
+            )));
         }
         Ok(())
     }
@@ -540,6 +539,29 @@ mod tests {
         let mut session = Session::new(console);
         assert_eq!(session.login_factory().unwrap(), None);
         assert_eq!(session.hostname(), "Switch");
+    }
+
+    #[test]
+    fn factory_login_keeps_an_accepted_password_when_only_enable_changes() {
+        let mut session = session(vec![
+            ("", "\r\nUsername: "),
+            ("cisco", "\r\nPassword: "),
+            ("cisco", "\r\nConfirm password: "),
+            ("cisco", "\r\nEnter enable secret: "),
+            (
+                "cisco",
+                "\r\n% Password rejected. Too short.\r\nEnter enable secret: ",
+            ),
+            ("Passw0rd%", "\r\nConfirm enable secret: "),
+            ("Passw0rd%", "\r\nSwitch>"),
+            ("enable", "\r\nPassword: "),
+            ("Passw0rd%", "\r\nSwitch#"),
+            ("terminal length 0", "\r\nSwitch#"),
+        ]);
+        let secrets = session.login_factory().unwrap().unwrap();
+        assert_eq!(secrets.username, "cisco");
+        assert_eq!(secrets.password, "cisco");
+        assert_eq!(secrets.enable_secret, "Passw0rd%");
     }
 
     #[test]
@@ -835,6 +857,23 @@ mod tests {
     }
 
     #[test]
+    fn command_rejected_is_a_configure_rejection() {
+        let line = "switchport mode access";
+        let mut session = session(vec![
+            ("configure terminal", "\r\nSwitch(config)#"),
+            (
+                line,
+                "\r\n% Command rejected: this command is not supported.\r\nSwitch(config)#",
+            ),
+            ("end", "\r\nSwitch#"),
+        ]);
+        assert_eq!(
+            session.configure(&strings(&[line])).unwrap(),
+            strings(&[line])
+        );
+    }
+
+    #[test]
     fn a_warning_is_not_a_rejection() {
         let line = "username bench privilege 15 password BenchPass";
         let mut session = session(vec![
@@ -947,6 +986,38 @@ mod tests {
                 Err(SessionError::Stopped(reason)) => assert!(reason.contains(reason_part)),
                 other => panic!("unexpected {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn save_and_copy_stops_include_the_device_output() {
+        let mut saving = session(vec![
+            (
+                "copy running-config startup-config",
+                "\r\nDestination filename [startup-config]? ",
+            ),
+            ("", "\r\nBuilding configuration...\r\nSwitch#"),
+        ]);
+        match saving.save() {
+            Err(SessionError::Stopped(reason)) => {
+                assert!(reason.contains("Building configuration..."))
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let command = "copy tftp://192.0.2.1/image.17.12.05.bin flash:";
+        let mut copy = session(vec![
+            (command, "\r\nDestination filename [image.17.12.05.bin]? "),
+            (
+                "",
+                "\r\nAccessing tftp://192.0.2.1/image.17.12.05.bin...\r\nSwitch#",
+            ),
+        ]);
+        match copy.copy_image(command) {
+            Err(SessionError::Stopped(reason)) => {
+                assert!(reason.contains("Accessing tftp://192.0.2.1/image.17.12.05.bin"))
+            }
+            other => panic!("unexpected {other:?}"),
         }
     }
 

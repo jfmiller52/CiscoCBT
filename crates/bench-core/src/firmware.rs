@@ -43,19 +43,20 @@ fn is_patch(segment: &str) -> bool {
     letters.len() < segment.len() && letters.bytes().all(|b| b.is_ascii_lowercase())
 }
 
-/// True when `bytes[start..end]` is not extended by a digit, or by a dot and a
-/// digit, directly before `start` or directly after `end`.
+/// True when `bytes[start..end]` is not extended by a digit or a trailing
+/// letter, or by a dot and a digit, directly before `start` or directly after
+/// `end`. A trailing letter is part of the version token (`17.09.04a`).
 fn is_bounded(bytes: &[u8], start: usize, end: usize) -> bool {
-    let digit_at = |index: Option<usize>| {
-        index
-            .and_then(|i| bytes.get(i))
-            .is_some_and(|b| b.is_ascii_digit())
-    };
-    let dot_at = |index: Option<usize>| index.and_then(|i| bytes.get(i)) == Some(&b'.');
+    let at = |index: Option<usize>| index.and_then(|i| bytes.get(i)).copied();
+    let digit_at = |index: Option<usize>| at(index).is_some_and(|b| b.is_ascii_digit());
+    let letter_at = |index: Option<usize>| at(index).is_some_and(|b| b.is_ascii_alphabetic());
+    let dot_at = |index: Option<usize>| at(index) == Some(b'.');
 
     let glued_before = digit_at(start.checked_sub(1))
         || (dot_at(start.checked_sub(1)) && digit_at(start.checked_sub(2)));
-    let glued_after = digit_at(Some(end)) || (dot_at(Some(end)) && digit_at(Some(end + 1)));
+    let glued_after = digit_at(Some(end))
+        || letter_at(Some(end))
+        || (dot_at(Some(end)) && digit_at(Some(end + 1)));
     !glued_before && !glued_after
 }
 
@@ -117,6 +118,28 @@ mod tests {
         assert_eq!(
             version_token("a.1.2.x.3.4.5b.bin"),
             Some("3.4.5b".to_string())
+        );
+    }
+
+    #[test]
+    fn a_trailing_letter_is_part_of_the_version_token() {
+        assert_eq!(
+            firmware_check(
+                "cat9k_iosxe.17.09.04.SPA.bin",
+                "Cisco IOS XE Software, Version 17.09.04a"
+            ),
+            FirmwareCheck::VersionMismatch
+        );
+        assert_eq!(
+            firmware_check(
+                "cat9k_iosxe.17.09.04a.SPA.bin",
+                "Cisco IOS XE Software, Version 17.09.04a"
+            ),
+            FirmwareCheck::Pass
+        );
+        assert_eq!(
+            firmware_check("cat9k_iosxe.17.09.04a.SPA.bin", "Version 17.09.04ab"),
+            FirmwareCheck::VersionMismatch
         );
     }
 
