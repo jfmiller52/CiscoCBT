@@ -1,6 +1,7 @@
 //! Drives an IOS-XE device over its console: login, commands, configuration,
 //! save, reload, image copy, and install.
 
+use std::fmt;
 use std::io;
 use std::time::Duration;
 
@@ -26,6 +27,19 @@ pub enum SessionError {
     Stopped(String),
 }
 
+impl fmt::Display for SessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SessionError::Io(message) => write!(f, "Console error: {message}"),
+            SessionError::Timeout { waiting_for } => write!(
+                f,
+                "The device did not respond while waiting for {waiting_for}."
+            ),
+            SessionError::Stopped(message) => f.write_str(message),
+        }
+    }
+}
+
 /// The first login read also covers a reboot.
 const BOOT_WAIT: Duration = Duration::from_secs(45 * 60);
 const LOGIN_STEP_WAIT: Duration = Duration::from_secs(5 * 60);
@@ -47,6 +61,7 @@ const CONFIRM_PASSWORD: &str = r"(?i)\b(confirm|re-enter)\b.*\b(password|secret)
 const ENABLE_SECRET: &str = r"(?i)\benter\b.*\benable secret\b[^:\n]*:\s*$";
 const PASSWORD: &str = r"(?i)password\s*:\s*$";
 const PASSWORD_REJECTED: &str = r"(?im)^%.*\b(password|secret)\b.*$";
+const BAD_SECRETS: &str = r"(?im)^\s*%\s*bad secrets\b.*$";
 const TOO_SHORT: &str = r"(?i)too short|minimum|at least \d+";
 const LOGIN_REFUSED: &str =
     r"(?im)^\s*%\s*(login invalid|bad passwords|authentication failed|access denied).*$";
@@ -80,11 +95,12 @@ enum Prompt {
 
 /// Earlier entries win when two prompts end at the same place, so
 /// `Confirm password:` is not read as `Password:`.
-const FACTORY_PROMPTS: [(Prompt, &str); 10] = [
+const FACTORY_PROMPTS: [(Prompt, &str); 11] = [
     (Prompt::InitialDialog, INITIAL_DIALOG),
     (Prompt::Autoinstall, AUTOINSTALL),
     (Prompt::PressReturn, PRESS_RETURN),
     (Prompt::Rejected, PASSWORD_REJECTED),
+    (Prompt::Rejected, BAD_SECRETS),
     (Prompt::ConfirmPassword, CONFIRM_PASSWORD),
     (Prompt::EnableSecret, ENABLE_SECRET),
     (Prompt::Username, USERNAME),
@@ -93,10 +109,11 @@ const FACTORY_PROMPTS: [(Prompt, &str); 10] = [
     (Prompt::UserExec, USER_EXEC),
 ];
 
-const USER_PROMPTS: [(Prompt, &str); 7] = [
+const USER_PROMPTS: [(Prompt, &str); 8] = [
     (Prompt::InitialDialog, INITIAL_DIALOG),
     (Prompt::PressReturn, PRESS_RETURN),
     (Prompt::Refused, LOGIN_REFUSED),
+    (Prompt::Refused, BAD_SECRETS),
     (Prompt::Username, USERNAME),
     (Prompt::Password, PASSWORD),
     (Prompt::Privileged, PRIVILEGED),
@@ -713,6 +730,38 @@ mod tests {
     }
 
     #[test]
+    fn login_with_stops_at_once_on_bad_secrets() {
+        for refusal in ["% Bad secrets", "% BAD SECRETS"] {
+            let output = format!("\r\n{refusal}\r\n\r\nSwitch>");
+            let mut session = session(vec![
+                ("", "\r\nUser Access Verification\r\n\r\nPassword: "),
+                ("LinePass", "\r\nSwitch>"),
+                ("enable", "\r\nPassword: "),
+                ("Wrong", output.as_str()),
+            ]);
+            match session.login_with(&user("cisco", "LinePass", "Wrong")) {
+                Err(SessionError::Stopped(reason)) => assert!(reason.contains(refusal)),
+                other => panic!("unexpected {other:?}"),
+            }
+            assert_eq!(written(&session), ["", "LinePass", "enable", "Wrong"]);
+        }
+    }
+
+    #[test]
+    fn factory_login_stops_on_bad_secrets() {
+        let mut session = session(vec![
+            ("", "\r\nSwitch>"),
+            ("enable", "\r\nPassword: "),
+            ("cisco", "\r\n% Bad secrets\r\n\r\nSwitch>"),
+        ]);
+        match session.login_factory() {
+            Err(SessionError::Stopped(reason)) => assert!(reason.contains("% Bad secrets")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(written(&session), ["", "enable", "cisco"]);
+    }
+
+    #[test]
     fn login_with_a_stop_writes_nothing() {
         let mut session = session(vec![]);
         let login = NextLogin::Stop {
@@ -753,6 +802,25 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn session_errors_read_as_plain_text() {
+        assert_eq!(
+            SessionError::Io("the serial port closed".into()).to_string(),
+            "Console error: the serial port closed"
+        );
+        assert_eq!(
+            SessionError::Timeout {
+                waiting_for: "the reload confirmation".into()
+            }
+            .to_string(),
+            "The device did not respond while waiting for the reload confirmation."
+        );
+        assert_eq!(
+            SessionError::Stopped("The image copy did not report bytes copied.".into()).to_string(),
+            "The image copy did not report bytes copied."
+        );
     }
 
     #[test]
