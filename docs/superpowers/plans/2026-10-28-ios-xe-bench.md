@@ -541,7 +541,7 @@ git commit -m "feat: choose the post-apply console login"
 **Interfaces:**
 - Consumes: `CheckStatus` from Task 1
 - Produces:
-  - `pub struct ExportInput { pub hostname: String, pub serial: String, pub config_file: String, pub configuration: CheckStatus, pub firmware_file: Option<String>, pub running_version: Option<String>, pub burn_in_hours: Option<u32>, pub uptime_line: Option<String>, pub burn_in: CheckStatus, pub ports: Vec<(String, CheckStatus)> }`
+  - `pub struct ExportInput { pub hostname: String, pub serial: String, pub config_file: String, pub configuration: CheckStatus, pub firmware_file: Option<String>, pub running_version: Option<String>, pub firmware: CheckStatus, pub burn_in_hours: Option<u32>, pub uptime_line: Option<String>, pub burn_in: CheckStatus, pub ports: Vec<(String, CheckStatus)> }`
   - `pub fn export_text(input: &ExportInput) -> String`
   - `pub fn chassis_serial(show_inventory: &str, show_version: &str) -> Option<String>`
 
