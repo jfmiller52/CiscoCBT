@@ -8,6 +8,7 @@ pub struct ExportInput {
     pub configuration: CheckStatus,
     pub firmware_file: Option<String>,
     pub running_version: Option<String>,
+    pub firmware: CheckStatus,
     pub burn_in_hours: Option<u32>,
     pub uptime_line: Option<String>,
     pub burn_in: CheckStatus,
@@ -36,6 +37,7 @@ pub fn export_text(input: &ExportInput) -> String {
             Some(version) => out.push_str(&format!("Running version: {version}\n")),
             None => out.push_str("Running version: not reported\n"),
         }
+        push_status(&mut out, "Firmware result", &input.firmware);
     }
 
     if input.burn_in != CheckStatus::NotChosen {
@@ -138,6 +140,7 @@ mod tests {
             configuration: CheckStatus::Passed,
             firmware_file: None,
             running_version: None,
+            firmware: CheckStatus::NotChosen,
             burn_in_hours: None,
             uptime_line: None,
             burn_in: CheckStatus::NotChosen,
@@ -194,10 +197,35 @@ mod tests {
         let text = export_text(&ExportInput {
             firmware_file: Some("cat9k_iosxe.17.09.04.SPA.bin".into()),
             running_version: Some("17.09.04".into()),
+            firmware: CheckStatus::Passed,
             ..base()
         });
         assert!(text.contains("Firmware image file: cat9k_iosxe.17.09.04.SPA.bin\n"));
         assert!(text.contains("Running version: 17.09.04\n"));
+        assert!(text.contains("Firmware result: Passed\n"));
+    }
+
+    #[test]
+    fn failed_firmware_prints_its_detail_indented() {
+        let text = export_text(&ExportInput {
+            firmware_file: Some("cat9k_iosxe.17.09.04.SPA.bin".into()),
+            running_version: Some("17.06.03".into()),
+            firmware: CheckStatus::Failed {
+                detail: "Running 17.06.03, expected 17.09.04".into(),
+            },
+            ..base()
+        });
+        assert!(text.contains("Firmware result: Failed\n    Running 17.06.03, expected 17.09.04\n"));
+    }
+
+    #[test]
+    fn unfinished_firmware_says_not_finished_yet() {
+        let text = export_text(&ExportInput {
+            firmware_file: Some("image.bin".into()),
+            firmware: CheckStatus::NotFinished,
+            ..base()
+        });
+        assert!(text.contains("Firmware result: Not finished yet\n"));
     }
 
     #[test]
@@ -231,6 +259,7 @@ mod tests {
             configuration: CheckStatus::Passed,
             firmware_file: None,
             running_version: None,
+            firmware: CheckStatus::NotChosen,
             burn_in_hours: Some(4),
             uptime_line: Some("closet-2-sw1 uptime is 4 hours, 6 minutes".into()),
             burn_in: CheckStatus::Passed,
