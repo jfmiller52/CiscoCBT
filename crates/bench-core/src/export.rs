@@ -13,6 +13,10 @@ pub struct ExportInput {
     pub uptime_line: Option<String>,
     pub burn_in: CheckStatus,
     pub ports: Vec<(String, CheckStatus)>,
+    pub capwap: CheckStatus,
+    pub capwap_ip: Option<String>,
+    pub capwap_mask: Option<String>,
+    pub capwap_gateway: Option<String>,
 }
 
 /// Render the plain-text validation record the technician saves.
@@ -22,13 +26,15 @@ pub fn export_text(input: &ExportInput) -> String {
     out.push_str(&format!("Chassis serial number: {}\n", input.serial));
     out.push_str(&format!("Host name: {}\n", input.hostname));
 
-    out.push_str("\nConfiguration\n");
-    out.push_str(&format!("Configuration file: {}\n", input.config_file));
-    push_status(
-        &mut out,
-        "Running config contains the file's commands",
-        &input.configuration,
-    );
+    if input.configuration != CheckStatus::NotChosen {
+        out.push_str("\nConfiguration\n");
+        out.push_str(&format!("Configuration file: {}\n", input.config_file));
+        push_status(
+            &mut out,
+            "Running config contains the file's commands",
+            &input.configuration,
+        );
+    }
 
     if let Some(file) = &input.firmware_file {
         out.push_str("\nFirmware\n");
@@ -38,6 +44,23 @@ pub fn export_text(input: &ExportInput) -> String {
             None => out.push_str("Running version: not reported\n"),
         }
         push_status(&mut out, "Firmware result", &input.firmware);
+    }
+
+    if input.capwap != CheckStatus::NotChosen || input.capwap_ip.is_some() {
+        out.push_str("\nCAPWAP\n");
+        out.push_str(&format!(
+            "CAPWAP IP: {}\n",
+            input.capwap_ip.as_deref().unwrap_or("not reported")
+        ));
+        out.push_str(&format!(
+            "Subnet mask: {}\n",
+            input.capwap_mask.as_deref().unwrap_or("not reported")
+        ));
+        out.push_str(&format!(
+            "Default gateway: {}\n",
+            input.capwap_gateway.as_deref().unwrap_or("not reported")
+        ));
+        push_status(&mut out, "CAPWAP result", &input.capwap);
     }
 
     if input.burn_in != CheckStatus::NotChosen {
@@ -145,7 +168,65 @@ mod tests {
             uptime_line: None,
             burn_in: CheckStatus::NotChosen,
             ports: vec![],
+            capwap: CheckStatus::NotChosen,
+            capwap_ip: None,
+            capwap_mask: None,
+            capwap_gateway: None,
         }
+    }
+
+    #[test]
+    fn access_point_export_omits_configuration_and_lists_passed_capwap() {
+        let text = export_text(&ExportInput {
+            configuration: CheckStatus::NotChosen,
+            capwap: CheckStatus::Passed,
+            capwap_ip: Some("10.1.1.10".into()),
+            capwap_mask: Some("255.255.255.0".into()),
+            capwap_gateway: Some("10.1.1.1".into()),
+            ..base()
+        });
+        assert!(!text.contains("Configuration\n"));
+        assert!(!text.contains("Configuration file:"));
+        assert!(!text.contains("Running config contains"));
+        assert!(text.contains("\nCAPWAP\n"));
+        assert!(text.contains("CAPWAP IP: 10.1.1.10\n"));
+        assert!(text.contains("Subnet mask: 255.255.255.0\n"));
+        assert!(text.contains("Default gateway: 10.1.1.1\n"));
+        assert!(text.contains("CAPWAP result: Passed\n"));
+        assert!(text.contains("Device validation record\n"));
+        assert!(text.contains("Chassis serial number: FOC1\n"));
+    }
+
+    #[test]
+    fn failed_capwap_indents_its_detail() {
+        let text = export_text(&ExportInput {
+            configuration: CheckStatus::NotChosen,
+            capwap: CheckStatus::Failed {
+                detail: "Missing default gateway\nshow capwap client config\nIP 10.9.9.9".into(),
+            },
+            capwap_ip: Some("10.1.1.10".into()),
+            capwap_mask: Some("255.255.255.0".into()),
+            capwap_gateway: Some("10.1.1.1".into()),
+            ..base()
+        });
+        assert!(text.contains(
+            "CAPWAP result: Failed\n    Missing default gateway\n    show capwap client config\n    IP 10.9.9.9\n"
+        ));
+    }
+
+    #[test]
+    fn capwap_section_appears_when_only_the_ip_is_set() {
+        let text = export_text(&ExportInput {
+            capwap: CheckStatus::NotChosen,
+            capwap_ip: Some("10.0.0.5".into()),
+            ..base()
+        });
+        assert!(text.contains("\nCAPWAP\n"));
+        assert!(text.contains("CAPWAP IP: 10.0.0.5\n"));
+        assert!(text.contains("Subnet mask: not reported\n"));
+        assert!(text.contains("Default gateway: not reported\n"));
+        assert!(text.contains("CAPWAP result: Not finished yet\n"));
+        assert!(text.contains("\nConfiguration\n"));
     }
 
     #[test]
@@ -188,6 +269,7 @@ mod tests {
         assert!(!text.contains("Firmware"));
         assert!(!text.contains("Burn-in"));
         assert!(!text.contains("Ports"));
+        assert!(!text.contains("CAPWAP"));
         assert!(!text.contains('\r'));
         assert!(text.is_ascii());
     }
@@ -264,6 +346,10 @@ mod tests {
             uptime_line: Some("closet-2-sw1 uptime is 4 hours, 6 minutes".into()),
             burn_in: CheckStatus::Passed,
             ports: vec![("Gi1/0/1".into(), CheckStatus::Passed)],
+            capwap: CheckStatus::NotChosen,
+            capwap_ip: None,
+            capwap_mask: None,
+            capwap_gateway: None,
         });
         assert!(text.contains("FOC2345L0AB"));
         assert!(text.contains("closet-access.cfg"));

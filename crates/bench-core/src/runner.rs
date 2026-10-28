@@ -231,6 +231,10 @@ impl<C: Console> Runner<C> {
             uptime_line: self.uptime_line.clone(),
             burn_in: self.record.burn_in.clone(),
             ports,
+            capwap: CheckStatus::NotChosen,
+            capwap_ip: None,
+            capwap_mask: None,
+            capwap_gateway: None,
         }
     }
 
@@ -1138,6 +1142,10 @@ mod tests {
                     ("GigabitEthernet1/0/1".into(), CheckStatus::NotFinished),
                     ("GigabitEthernet1/0/2".into(), CheckStatus::NotFinished),
                 ],
+                capwap: CheckStatus::NotChosen,
+                capwap_ip: None,
+                capwap_mask: None,
+                capwap_gateway: None,
             }
         );
         let text = export_text(&input);
