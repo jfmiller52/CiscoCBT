@@ -5,6 +5,7 @@ pub mod form;
 pub mod login;
 pub mod phase;
 pub mod ports;
+pub mod present;
 pub mod run;
 pub mod transfer;
 pub mod uptime;
@@ -19,6 +20,7 @@ pub use login::{
 };
 pub use phase::{next_phase, port_walk_available, start_phase, Phase, PhaseEvent};
 pub use ports::{first_physical, physical_interfaces, router_port_passed, switch_port_passed};
+pub use present::{release_heading, reminder_line, status_label};
 pub use run::{
     ready_to_release, validate_burn_in_hours, CheckStatus, FirmwareChoice, RunOptions, RunRecord,
 };
