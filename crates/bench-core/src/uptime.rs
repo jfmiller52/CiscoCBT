@@ -88,7 +88,12 @@ mod tests {
         let lines =
             parse_uptime_lines("Switch uptime is 1 year, 2 weeks, 3 days, 4 hours, 5 minutes");
         let expected = (365 + 14 + 3) * 24 * 60 + 4 * 60 + 5;
-        assert_eq!(lines, vec![Uptime { minutes_total: expected }]);
+        assert_eq!(
+            lines,
+            vec![Uptime {
+                minutes_total: expected
+            }]
+        );
     }
 
     #[test]
@@ -119,7 +124,12 @@ mod tests {
         let lines = parse_uptime_lines(
             "Switch uptime is 99999999999999999999999 years, 18446744073709551615 weeks",
         );
-        assert_eq!(lines, vec![Uptime { minutes_total: u64::MAX }]);
+        assert_eq!(
+            lines,
+            vec![Uptime {
+                minutes_total: u64::MAX
+            }]
+        );
         assert!(burn_in_passes(u32::MAX, &lines));
     }
 }

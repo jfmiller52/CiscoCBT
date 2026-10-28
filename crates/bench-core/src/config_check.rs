@@ -34,7 +34,9 @@ pub fn canonical_interface_name(name: &str) -> String {
             continue;
         }
         let word_end = scan(&chars, i, |c| c.is_ascii_alphabetic() || c == '-');
-        let port_end = scan(&chars, word_end, |c| c.is_ascii_digit() || c == '/' || c == '.');
+        let port_end = scan(&chars, word_end, |c| {
+            c.is_ascii_digit() || c == '/' || c == '.'
+        });
         let word: String = chars[i..word_end].iter().collect();
         let has_port = port_end > word_end && chars[word_end].is_ascii_digit();
         match full_interface_name(&word).filter(|_| has_port) {
@@ -94,11 +96,17 @@ fn parse(text: &str) -> Vec<Entry> {
         if is_ignored(&normalized) {
             continue;
         }
-        let line = Line { original: raw.to_string(), normalized };
+        let line = Line {
+            original: raw.to_string(),
+            normalized,
+        };
         let indented = raw.starts_with(char::is_whitespace);
         match entries.last_mut() {
             Some(entry) if indented => entry.children.push(line),
-            _ => entries.push(Entry { header: line, children: Vec::new() }),
+            _ => entries.push(Entry {
+                header: line,
+                children: Vec::new(),
+            }),
         }
     }
     entries
@@ -113,7 +121,10 @@ fn is_ignored(normalized: &str) -> bool {
     let lower = normalized.to_ascii_lowercase();
     normalized.is_empty()
         || normalized.starts_with('!')
-        || matches!(lower.as_str(), "configure terminal" | "conf t" | "end" | "exit")
+        || matches!(
+            lower.as_str(),
+            "configure terminal" | "conf t" | "end" | "exit"
+        )
         || lower.starts_with("building configuration")
         || lower.starts_with("current configuration")
         || lower.starts_with("last configuration change")
@@ -124,7 +135,10 @@ fn check_entry(entry: &Entry, running: &[Entry], missing: &mut Vec<String>) {
     let range = range_headers(header);
     let is_range = range.is_some();
     let targets = range.unwrap_or_else(|| vec![header.to_string()]);
-    let top: Vec<&str> = running.iter().map(|e| e.header.normalized.as_str()).collect();
+    let top: Vec<&str> = running
+        .iter()
+        .map(|e| e.header.normalized.as_str())
+        .collect();
     let header_present = if is_range {
         targets.iter().all(|t| top.contains(&t.as_str()))
     } else {
@@ -137,7 +151,10 @@ fn check_entry(entry: &Entry, running: &[Entry], missing: &mut Vec<String>) {
     }
     let sections: Vec<Vec<&str>> = targets.iter().map(|t| section_lines(running, t)).collect();
     for child in &entry.children {
-        if !sections.iter().all(|lines| is_present(&child.normalized, lines)) {
+        if !sections
+            .iter()
+            .all(|lines| is_present(&child.normalized, lines))
+        {
             missing.push(child.original.clone());
         }
     }
@@ -157,7 +174,8 @@ fn range_headers(header: &str) -> Option<Vec<String>> {
     let spec = header.strip_prefix("interface range ")?;
     let mut headers = Vec::new();
     for item in spec.split(',') {
-        let members = expand_range_item(item.trim()).unwrap_or_else(|| vec![item.trim().to_string()]);
+        let members =
+            expand_range_item(item.trim()).unwrap_or_else(|| vec![item.trim().to_string()]);
         headers.extend(members.into_iter().map(|m| format!("interface {m}")));
     }
     Some(headers)
@@ -230,7 +248,8 @@ mod tests {
 
     #[test]
     fn extra_device_lines_do_not_fail() {
-        let file = "hostname closet-2-sw1\ninterface GigabitEthernet1/0/1\n switchport mode access\n";
+        let file =
+            "hostname closet-2-sw1\ninterface GigabitEthernet1/0/1\n switchport mode access\n";
         let running = "Building configuration...\nCurrent configuration : 4821 bytes\nhostname closet-2-sw1\nntp clock-period 36029123\ninterface GigabitEthernet1/0/1\n switchport mode access\n";
         assert!(missing_commands(file, running).is_empty());
     }
@@ -251,9 +270,14 @@ mod tests {
 
     #[test]
     fn a_missing_command_is_named() {
-        let file = "hostname closet-2-sw1\ninterface GigabitEthernet1/0/1\n switchport access vlan 20\n";
-        let running = "hostname closet-2-sw1\ninterface GigabitEthernet1/0/1\n switchport mode access\n";
-        assert_eq!(missing_commands(file, running), vec![" switchport access vlan 20".to_string()]);
+        let file =
+            "hostname closet-2-sw1\ninterface GigabitEthernet1/0/1\n switchport access vlan 20\n";
+        let running =
+            "hostname closet-2-sw1\ninterface GigabitEthernet1/0/1\n switchport mode access\n";
+        assert_eq!(
+            missing_commands(file, running),
+            vec![" switchport access vlan 20".to_string()]
+        );
     }
 
     #[test]
@@ -312,7 +336,10 @@ mod tests {
         let running = "interface GigabitEthernet1/0/1
  switchport mode access
 ";
-        assert_eq!(missing(file, running), vec!["   spanning-tree portfast".to_string()]);
+        assert_eq!(
+            missing(file, running),
+            vec!["   spanning-tree portfast".to_string()]
+        );
     }
 
     #[test]
@@ -346,7 +373,10 @@ interface GigabitEthernet1/0/1
 interface GigabitEthernet1/0/2
  switchport mode access
 ";
-        assert_eq!(missing(file, running), vec![" switchport mode access".to_string()]);
+        assert_eq!(
+            missing(file, running),
+            vec![" switchport mode access".to_string()]
+        );
     }
 
     #[test]
@@ -354,8 +384,14 @@ interface GigabitEthernet1/0/2
         let running = "interface GigabitEthernet1/0/1
  ip http server
 ";
-        assert_eq!(missing("ip http server
-", running), vec!["ip http server".to_string()]);
+        assert_eq!(
+            missing(
+                "ip http server
+",
+                running
+            ),
+            vec!["ip http server".to_string()]
+        );
     }
 
     #[test]
@@ -371,10 +407,16 @@ interface GigabitEthernet1/0/3
  switchport access vlan 20
 ";
         assert!(missing(file, all).is_empty());
-        let one_wrong = all.replace("vlan 20
-interface GigabitEthernet1/0/3", "vlan 30
-interface GigabitEthernet1/0/3");
-        assert_eq!(missing(file, &one_wrong), vec![" switchport access vlan 20".to_string()]);
+        let one_wrong = all.replace(
+            "vlan 20
+interface GigabitEthernet1/0/3",
+            "vlan 30
+interface GigabitEthernet1/0/3",
+        );
+        assert_eq!(
+            missing(file, &one_wrong),
+            vec![" switchport access vlan 20".to_string()]
+        );
         let no_member = "interface GigabitEthernet1/0/1
  switchport access vlan 20
 interface GigabitEthernet1/0/2
@@ -382,7 +424,10 @@ interface GigabitEthernet1/0/2
 ";
         assert_eq!(
             missing(file, no_member),
-            vec!["interface range Gi1/0/1-3".to_string(), " switchport access vlan 20".to_string()]
+            vec![
+                "interface range Gi1/0/1-3".to_string(),
+                " switchport access vlan 20".to_string()
+            ]
         );
     }
 
@@ -399,9 +444,12 @@ interface GigabitEthernet1/0/5
  shutdown
 ";
         assert!(missing(file, running).is_empty());
-        let without_five = running.replace("interface GigabitEthernet1/0/5
+        let without_five = running.replace(
+            "interface GigabitEthernet1/0/5
  shutdown
-", "");
+",
+            "",
+        );
         assert_eq!(missing(file, &without_five).len(), 2);
     }
 
@@ -418,9 +466,15 @@ interface GigabitEthernet1/0/5
  no shutdown
 ";
         assert!(missing(file, explicit).is_empty());
-        assert_eq!(missing("no ip http server
-", "ip http server
-"), vec!["no ip http server".to_string()]);
+        assert_eq!(
+            missing(
+                "no ip http server
+",
+                "ip http server
+"
+            ),
+            vec!["no ip http server".to_string()]
+        );
     }
 
     #[test]
@@ -430,27 +484,47 @@ line vty 0 4
  password 7 0822455D
  enable secret 5 x
 ";
-        assert!(missing("line vty 0 4
+        assert!(missing(
+            "line vty 0 4
  password cisco
-", running).is_empty());
+",
+            running
+        )
+        .is_empty());
         assert_eq!(
-            missing("username admin privilege 15 secret 0 pw
-", running),
+            missing(
+                "username admin privilege 15 secret 0 pw
+",
+                running
+            ),
             vec!["username admin privilege 15 secret 0 pw".to_string()]
         );
         assert_eq!(
-            missing("username cisco privilege 1 secret 0 pw
-", running),
+            missing(
+                "username cisco privilege 1 secret 0 pw
+",
+                running
+            ),
             vec!["username cisco privilege 1 secret 0 pw".to_string()]
         );
         assert_eq!(
-            missing("enable secret 0 pw
-", running),
+            missing(
+                "enable secret 0 pw
+",
+                running
+            ),
             vec!["enable secret 0 pw".to_string()],
             "enable secret is not in the vty section"
         );
-        assert_eq!(missing("no username cisco privilege 15 secret
-", running).len(), 1);
+        assert_eq!(
+            missing(
+                "no username cisco privilege 15 secret
+",
+                running
+            )
+            .len(),
+            1
+        );
     }
 
     #[test]
@@ -471,8 +545,12 @@ end
     fn no_ip_address_is_missing_when_an_address_remains() {
         let file = "interface Gi1/0/1\n no ip address\n";
         let with_address = "interface GigabitEthernet1/0/1\n ip address 10.0.0.1 255.255.255.0\n";
-        assert_eq!(missing(file, with_address), vec![" no ip address".to_string()]);
-        let without = "interface GigabitEthernet1/0/1\n ip addresses-other 1\n switchport mode access\n";
+        assert_eq!(
+            missing(file, with_address),
+            vec![" no ip address".to_string()]
+        );
+        let without =
+            "interface GigabitEthernet1/0/1\n ip addresses-other 1\n switchport mode access\n";
         assert!(missing(file, without).is_empty());
         let shut = "interface GigabitEthernet1/0/1\n switchport mode access\n";
         assert!(missing("interface Gi1/0/1\n no shutdown\n", shut).is_empty());
@@ -481,7 +559,11 @@ end
     #[test]
     fn descriptions_mentioning_password_compare_exactly() {
         let running = "interface GigabitEthernet1/0/1\n description password reset kiosk\n";
-        assert!(missing("interface Gi1/0/1\n description password reset kiosk\n", running).is_empty());
+        assert!(missing(
+            "interface Gi1/0/1\n description password reset kiosk\n",
+            running
+        )
+        .is_empty());
         assert_eq!(
             missing("interface Gi1/0/1\n description password\n", running),
             vec![" description password".to_string()]

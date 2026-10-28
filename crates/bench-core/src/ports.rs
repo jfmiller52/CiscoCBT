@@ -21,7 +21,11 @@ const NON_PHYSICAL_PREFIXES: [&str; 11] = [
 
 /// Interface names that are physical ports, in the order given.
 pub fn physical_interfaces(names: &[String]) -> Vec<String> {
-    names.iter().filter(|name| is_physical(name)).cloned().collect()
+    names
+        .iter()
+        .filter(|name| is_physical(name))
+        .cloned()
+        .collect()
 }
 
 /// The first physical interface in device order, if any.
@@ -31,7 +35,9 @@ pub fn first_physical(names: &[String]) -> Option<String> {
 
 fn is_physical(name: &str) -> bool {
     let canonical = canonical_interface_name(name).to_ascii_lowercase();
-    !NON_PHYSICAL_PREFIXES.iter().any(|prefix| canonical.starts_with(prefix))
+    !NON_PHYSICAL_PREFIXES
+        .iter()
+        .any(|prefix| canonical.starts_with(prefix))
 }
 
 /// Whether `port` shows as `connected` in `show interfaces status` output.
@@ -99,9 +105,9 @@ fn token_at(line: &str, column: usize) -> Option<&str> {
 /// `is up, line protocol is up`.
 pub fn router_port_passed(show_interfaces: &str, port: &str) -> bool {
     let wanted = canonical_interface_name(port.trim());
-    show_interfaces.lines().any(|line| {
-        row_is_for(line, &wanted) && line.contains("is up, line protocol is up")
-    })
+    show_interfaces
+        .lines()
+        .any(|line| row_is_for(line, &wanted) && line.contains("is up, line protocol is up"))
 }
 
 #[cfg(test)]
@@ -110,9 +116,19 @@ mod tests {
 
     #[test]
     fn first_physical_keeps_management_and_skips_virtual() {
-        let names = vec!["Loopback0".into(), "Vlan1".into(), "GigabitEthernet0/0".into(), "GigabitEthernet1/0/1".into()];
-        assert_eq!(first_physical(&names).as_deref(), Some("GigabitEthernet0/0"));
-        assert!(!physical_interfaces(&names).iter().any(|n| n == "Loopback0" || n == "Vlan1"));
+        let names = vec![
+            "Loopback0".into(),
+            "Vlan1".into(),
+            "GigabitEthernet0/0".into(),
+            "GigabitEthernet1/0/1".into(),
+        ];
+        assert_eq!(
+            first_physical(&names).as_deref(),
+            Some("GigabitEthernet0/0")
+        );
+        assert!(!physical_interfaces(&names)
+            .iter()
+            .any(|n| n == "Loopback0" || n == "Vlan1"));
     }
 
     #[test]
@@ -140,8 +156,18 @@ mod tests {
     #[test]
     fn skip_prefixes_are_case_insensitive_and_keep_order() {
         let names: Vec<String> = [
-            "loopback1", "TUNNEL0", "Virtual-Access1", "Port-channel1", "BDI10", "NVI0", "Null0",
-            "Dialer1", "AppGigabitEthernet1/0/1", "Bluetooth0/4", "FastEthernet0", "TenGigabitEthernet1/1/1",
+            "loopback1",
+            "TUNNEL0",
+            "Virtual-Access1",
+            "Port-channel1",
+            "BDI10",
+            "NVI0",
+            "Null0",
+            "Dialer1",
+            "AppGigabitEthernet1/0/1",
+            "Bluetooth0/4",
+            "FastEthernet0",
+            "TenGigabitEthernet1/1/1",
             "GigabitEthernet1/0/2",
         ]
         .into_iter()
@@ -149,13 +175,20 @@ mod tests {
         .collect();
         assert_eq!(
             physical_interfaces(&names),
-            vec!["FastEthernet0", "TenGigabitEthernet1/1/1", "GigabitEthernet1/0/2"]
+            vec![
+                "FastEthernet0",
+                "TenGigabitEthernet1/1/1",
+                "GigabitEthernet1/0/2"
+            ]
         );
     }
 
     #[test]
     fn abbreviated_virtual_names_are_skipped() {
-        let names: Vec<String> = ["Vl1", "Po2", "Lo0", "Gi1/0/1"].into_iter().map(String::from).collect();
+        let names: Vec<String> = ["Vl1", "Po2", "Lo0", "Gi1/0/1"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         assert_eq!(physical_interfaces(&names), vec!["Gi1/0/1"]);
     }
 
@@ -186,8 +219,14 @@ mod tests {
         assert!(!switch_port_passed(table, ""));
         assert!(!switch_port_passed("", "Gi1/0/3"));
         assert!(!switch_port_passed("Port Name Status\n", "Gi1/0/3"));
-        assert!(!switch_port_passed("Port Name Status\nGi1/0/3\n", "Gi1/0/3"));
-        assert!(!switch_port_passed("Port Name Status\nGi1/0/3 a\n", "Gi1/0/3"));
+        assert!(!switch_port_passed(
+            "Port Name Status\nGi1/0/3\n",
+            "Gi1/0/3"
+        ));
+        assert!(!switch_port_passed(
+            "Port Name Status\nGi1/0/3 a\n",
+            "Gi1/0/3"
+        ));
     }
 
     #[test]
