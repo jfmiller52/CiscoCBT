@@ -70,6 +70,9 @@ const DESTINATION: &str = r"(?i)destination filename \[[^\]\n]*\]\?";
 const OVERWRITE: &str = r"(?i)do you want to over write\? \[confirm\]";
 const SAVE_QUESTION: &str = r"(?i)save\? \[yes/no\]";
 const CONFIRM: &str = r"(?i)\[confirm\]";
+/// Nexus reload: `This command will reboot the system. (y/n)? [n]`.
+/// Parentheses, not the IOS `[y/n]` / `[confirm]` forms. The default is `n`.
+const NXOS_RELOAD: &str = r"(?i)\(y/n\)\?\s*\[n\]";
 const PROCEED: &str = r"(?i)\[y/n\]";
 const YES_NO: &str = r"(?i)\[yes/no\]";
 const INSTALL_FAILED: &str = r"(?im)^.*(FAILED|%Error|Invalid input).*$";
@@ -324,7 +327,10 @@ impl<C: Console> Session<C> {
     }
 
     /// Saves with `command` (the family's startup-config copy) and returns
-    /// once the device reports `[OK]`.
+    /// once the device reports `[OK]` or `Copy complete`.
+    ///
+    /// IOS asks for a destination filename. NX-OS does not: it prints a
+    /// progress bar and `Copy complete.`
     pub fn save_startup(&mut self, command: &str) -> Result<(), SessionError> {
         self.send(command)?;
         let (_, output) = self.answer_until(
@@ -338,9 +344,9 @@ impl<C: Console> Session<C> {
                 "Saving the configuration failed: {line}\n{output}"
             )));
         }
-        if !output.contains("[OK]") {
+        if !save_succeeded(&output) {
             return Err(SessionError::Stopped(format!(
-                "Saving the configuration did not report [OK].\n{output}"
+                "Saving the configuration did not report [OK] or Copy complete.\n{output}"
             )));
         }
         Ok(())
@@ -348,15 +354,19 @@ impl<C: Console> Session<C> {
 
     /// Reloads without saving and returns once the reload is confirmed. The
     /// caller logs in again.
+    ///
+    /// IOS `[confirm]` takes an empty line. NX-OS asks `(y/n)? [n]`; an empty
+    /// line accepts the default `n` and cancels the reload, so the answer is `y`.
     pub fn reload(&mut self) -> Result<(), SessionError> {
         self.send("reload")?;
-        self.answer_until(
-            &[CONFIRM],
+        let (index, _) = self.answer_until(
+            &[CONFIRM, NXOS_RELOAD],
             &[(SAVE_QUESTION, "no")],
             PROMPT_WAIT,
             "the reload confirmation",
         )?;
-        self.send("")
+        let answer = if index == 0 { "" } else { "y" };
+        self.send(answer)
     }
 
     pub fn copy_image(&mut self, command: &str) -> Result<(), SessionError> {
@@ -372,7 +382,7 @@ impl<C: Console> Session<C> {
                 "The image copy failed: {line}\n{output}"
             )));
         }
-        if !output.contains("bytes copied") {
+        if !copy_succeeded(&output) {
             return Err(SessionError::Stopped(format!(
                 "The image copy did not report bytes copied.\n{output}"
             )));
@@ -488,6 +498,19 @@ fn too_many_prompts(goal: &str) -> SessionError {
 
 fn install_failed(output: &str) -> SessionError {
     SessionError::Stopped(format!("The image install failed: {}", last_line(output)))
+}
+
+/// IOS prints `[OK]`. NX-OS prints a progress bar and `Copy complete.`
+fn save_succeeded(output: &str) -> bool {
+    output.contains("[OK]") || output.contains("Copy complete")
+}
+
+/// IOS prints `bytes copied`. NX-OS prints `TFTP get operation was successful`
+/// and `Copy complete, now saving to disk`.
+fn copy_succeeded(output: &str) -> bool {
+    output.contains("bytes copied")
+        || output.contains("TFTP get operation was successful")
+        || output.contains("Copy complete, now saving to disk")
 }
 
 /// The last line of text that was read through the end of a line pattern.
@@ -628,6 +651,19 @@ mod tests {
             session.console().written(),
             &["reload".to_string(), "no".to_string(), "".to_string()]
         );
+    }
+
+    #[test]
+    fn reload_answers_y_to_the_nxos_reboot_question() {
+        let mut session = session(vec![
+            (
+                "reload",
+                "\r\nThis command will reboot the system. (y/n)? [n] ",
+            ),
+            ("y", "\r\n"),
+        ]);
+        session.reload().unwrap();
+        assert_eq!(written(&session), ["reload", "y"]);
     }
 
     #[test]
@@ -972,6 +1008,16 @@ mod tests {
     }
 
     #[test]
+    fn save_accepts_copy_complete_without_a_destination_prompt() {
+        let mut session = session(vec![(
+            "copy running-config startup-config",
+            "\r\n[####################] 100%\r\nCopy complete.\r\nswitch#",
+        )]);
+        session.save().unwrap();
+        assert_eq!(written(&session), ["copy running-config startup-config"]);
+    }
+
+    #[test]
     fn save_stops_on_an_error_or_without_ok() {
         for (output, reason_part) in [
             (
@@ -1045,6 +1091,17 @@ mod tests {
         ]);
         session.copy_image(command).unwrap();
         assert_eq!(written(&session), [command, "", ""]);
+    }
+
+    #[test]
+    fn copy_image_accepts_a_nexus_tftp_success() {
+        let command = "copy tftp://192.0.2.1/nxos.10.3.6.bin bootflash:nxos.10.3.6.bin";
+        let mut session = session(vec![(
+            command,
+            "\r\nTFTP get operation was successful\r\nCopy complete, now saving to disk (please wait)...\r\nswitch#",
+        )]);
+        session.copy_image(command).unwrap();
+        assert_eq!(written(&session), [command]);
     }
 
     #[test]

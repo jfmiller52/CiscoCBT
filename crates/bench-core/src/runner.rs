@@ -683,6 +683,61 @@ mod tests {
         "Building configuration...\r\n\r\nCurrent configuration : 4790 bytes\r\n!\r\nhostname closet-2-sw1\r\n!\r\ninterface GigabitEthernet1/0/1\r\n switchport mode access\r\n!\r\nend"
     }
 
+    /// NX-OS save is a progress bar and `Copy complete.` It does not ask for
+    /// a destination file and does not print `[OK]`.
+    fn nxos_apply_and_save() -> Steps {
+        vec![
+            step(
+                "configure terminal",
+                "configure terminal\r\nEnter configuration commands, one per line.  End with CNTL/Z.\r\nSwitch(config)#",
+            ),
+            step("hostname closet-2-sw1", "\r\ncloset-2-sw1(config)#"),
+            step(
+                "interface GigabitEthernet1/0/1",
+                "\r\ncloset-2-sw1(config-if)#",
+            ),
+            step(" switchport access vlan 20", "\r\ncloset-2-sw1(config-if)#"),
+            step("end", "\r\ncloset-2-sw1#"),
+            step(
+                "copy running-config startup-config",
+                "\r\n[####################] 100%\r\nCopy complete.\r\ncloset-2-sw1#",
+            ),
+        ]
+    }
+
+    /// NX-OS reload asks `(y/n)? [n]`. An empty line takes that default and
+    /// cancels the reload, so the answer is `y`.
+    fn nxos_reload_and_login(enable_secret: Option<&str>) -> Steps {
+        let mut steps = vec![
+            step(
+                "reload",
+                "\r\nThis command will reboot the system. (y/n)? [n] ",
+            ),
+            step("y", "\r\n"),
+            step("", "\r\nPress RETURN to get started!\r\n"),
+            step("", "\r\ncloset-2-sw1>"),
+        ];
+        match enable_secret {
+            Some(secret) => steps.extend([
+                step("enable", "\r\nPassword: "),
+                step(secret, "\r\ncloset-2-sw1#"),
+            ]),
+            None => steps.push(step("enable", "\r\ncloset-2-sw1#")),
+        }
+        steps.push(step("terminal length 0", "\r\ncloset-2-sw1#"));
+        steps
+    }
+
+    fn nxos_config_steps(running: &str, enable_secret: Option<&str>) -> Steps {
+        [
+            nxos_apply_and_save(),
+            nxos_reload_and_login(enable_secret),
+            vec![exec("show running-config", running, "closet-2-sw1")],
+            nxos_reload_and_login(enable_secret),
+        ]
+        .concat()
+    }
+
     /// Apply, save, reload, validate, and the clean reboot.
     fn config_steps(running: &str, enable_secret: Option<&str>) -> Steps {
         [
@@ -1526,7 +1581,7 @@ Eth1/1        1       eth  routed up      none                       10G(D)  --
 
     #[test]
     fn nxos_config_only_validates_with_the_family_show_commands() {
-        let steps = [nxos_login(), config_steps(ok_running_config(), None)].concat();
+        let steps = [nxos_login(), nxos_config_steps(ok_running_config(), None)].concat();
         let mut runner = runner(nxos_options(None, None), BODY, steps);
         assert_eq!(drive(&mut runner), Phase::Done);
         assert_eq!(runner.record().configuration, CheckStatus::Passed);
@@ -1541,6 +1596,13 @@ Eth1/1        1       eth  routed up      none                       10G(D)  --
             .any(|w| w == strategy.show_running_config_command()));
         assert!(!written.iter().any(|w| w == "show ip interface brief"));
         assert!(!written.iter().any(|w| w == "no switchport"));
+        let save_at = written
+            .iter()
+            .position(|w| w == "copy running-config startup-config")
+            .unwrap();
+        assert_eq!(written[save_at + 1], "reload");
+        assert_eq!(written[save_at + 2], "y");
+        assert_eq!(written.iter().filter(|w| w.as_str() == "y").count(), 2);
         assert!(crate::run::export_available(
             DeviceFamily::Nxos,
             runner.record()
@@ -1552,7 +1614,7 @@ Eth1/1        1       eth  routed up      none                       10G(D)  --
         let uptime = "Kernel uptime is 0 day(s), 4 hour(s), 6 minute(s)";
         let steps = [
             nxos_login(),
-            config_steps(ok_running_config(), None),
+            nxos_config_steps(ok_running_config(), None),
             vec![exec(
                 "show version | include uptime",
                 uptime,
@@ -1594,10 +1656,9 @@ Eth1/1        1       eth  routed up      none                       10G(D)  --
             nxos_login(),
             address_steps,
             vec![
-                step(&copy, &format!("\r\nDestination filename [{image}]? ")),
                 step(
-                    "",
-                    &format!("\r\nAccessing tftp://192.0.2.1/{image}...\r\n[OK - 1234567 bytes]\r\n\r\n1234567 bytes copied in 80.0 secs\r\nSwitch#"),
+                    &copy,
+                    "\r\nTFTP get operation was successful\r\nCopy complete, now saving to disk (please wait)...\r\nSwitch#",
                 ),
                 step(
                     &install[0],
@@ -1606,7 +1667,7 @@ Eth1/1        1       eth  routed up      none                       10G(D)  --
             ],
             enable_secret_factory_login(),
             vec![exec("show version", version_after, "Switch")],
-            config_steps(ok_running_config(), Some("cisco")),
+            nxos_config_steps(ok_running_config(), Some("cisco")),
         ]
         .concat();
         let mut runner = runner(nxos_options(Some(image), None), BODY, steps);
