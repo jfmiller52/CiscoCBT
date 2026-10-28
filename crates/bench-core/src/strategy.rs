@@ -1,4 +1,5 @@
-//! Per-family CLI strings and pass checks. The runner is not wired here yet.
+//! Per-family CLI strings and pass checks. The runner asks [`strategy_for`] for
+//! the commands it sends.
 
 use crate::family::DeviceFamily;
 use crate::transfer::LinkKind;

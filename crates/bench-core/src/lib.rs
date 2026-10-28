@@ -36,7 +36,8 @@ pub use ports::{first_physical, physical_interfaces, router_port_passed, switch_
 pub use present::{release_heading, reminder_line, status_label};
 pub use family::{CapwapChoice, DeviceFamily};
 pub use run::{
-    ready_to_release, validate_burn_in_hours, CheckStatus, FirmwareChoice, RunOptions, RunRecord,
+    export_available, ready_to_release, validate_burn_in_hours, CheckStatus, FirmwareChoice,
+    RunOptions, RunRecord,
 };
 pub use runner::{device_kind, RunFiles, Runner};
 pub use scripted::ScriptedConsole;

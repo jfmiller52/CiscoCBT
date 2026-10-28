@@ -46,6 +46,17 @@ pub fn ready_to_release(record: &RunRecord) -> bool {
         && settled(&record.capwap)
 }
 
+/// Whether the record screen may offer export.
+///
+/// Switches keep the early export: the configuration check has passed.
+/// An access point exports only when every chosen check has passed.
+pub fn export_available(family: DeviceFamily, record: &RunRecord) -> bool {
+    match family {
+        DeviceFamily::AccessPoint => ready_to_release(record),
+        DeviceFamily::IosXe | DeviceFamily::Nxos => record.configuration == CheckStatus::Passed,
+    }
+}
+
 /// Burn-in must run for at least one hour.
 pub fn validate_burn_in_hours(hours: u32) -> Result<u32, ()> {
     if hours >= 1 {
@@ -116,5 +127,44 @@ mod tests {
             ..pending
         };
         assert!(ready_to_release(&done));
+    }
+
+    fn record(configuration: CheckStatus, capwap: CheckStatus) -> RunRecord {
+        RunRecord {
+            configuration,
+            firmware: CheckStatus::NotChosen,
+            burn_in: CheckStatus::NotChosen,
+            ports: CheckStatus::NotChosen,
+            capwap,
+        }
+    }
+
+    #[test]
+    fn switch_export_follows_the_configuration_check() {
+        let passed = record(CheckStatus::Passed, CheckStatus::NotChosen);
+        assert!(export_available(DeviceFamily::IosXe, &passed));
+        assert!(export_available(DeviceFamily::Nxos, &passed));
+        let early = RunRecord {
+            burn_in: CheckStatus::NotFinished,
+            ..passed
+        };
+        assert!(export_available(DeviceFamily::IosXe, &early));
+        let waiting = record(CheckStatus::NotFinished, CheckStatus::NotChosen);
+        assert!(!export_available(DeviceFamily::Nxos, &waiting));
+    }
+
+    #[test]
+    fn access_point_export_waits_until_the_chosen_checks_pass() {
+        let ready = record(CheckStatus::NotChosen, CheckStatus::Passed);
+        assert!(export_available(DeviceFamily::AccessPoint, &ready));
+        let pending = record(CheckStatus::NotChosen, CheckStatus::NotFinished);
+        assert!(!export_available(DeviceFamily::AccessPoint, &pending));
+        let failed = record(
+            CheckStatus::NotChosen,
+            CheckStatus::Failed {
+                detail: "IP".into(),
+            },
+        );
+        assert!(!export_available(DeviceFamily::AccessPoint, &failed));
     }
 }

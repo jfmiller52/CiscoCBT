@@ -73,8 +73,7 @@ const CONFIRM: &str = r"(?i)\[confirm\]";
 const PROCEED: &str = r"(?i)\[y/n\]";
 const YES_NO: &str = r"(?i)\[yes/no\]";
 const INSTALL_FAILED: &str = r"(?im)^.*(FAILED|%Error|Invalid input).*$";
-const INSTALL_RELOADING: &str =
-    r"(?i)\breloading\b|reload requested|initiating reload|SUCCESS:\s*install_add_activate_commit";
+const INSTALL_RELOADING: &str = r"(?i)\breloading\b|\brebooting\b|\breloaded\b|\breboot\b|reload requested|initiating reload|requested system reload|SUCCESS:\s*install_add_activate_commit";
 
 /// What a login read saw.
 #[derive(Debug, Clone, Copy)]
@@ -321,7 +320,13 @@ impl<C: Console> Session<C> {
     }
 
     pub fn save(&mut self) -> Result<(), SessionError> {
-        self.send(save_startup_command())?;
+        self.save_startup(save_startup_command())
+    }
+
+    /// Saves with `command` (the family's startup-config copy) and returns
+    /// once the device reports `[OK]`.
+    pub fn save_startup(&mut self, command: &str) -> Result<(), SessionError> {
+        self.send(command)?;
         let (_, output) = self.answer_until(
             &[PRIVILEGED],
             &[(DESTINATION, "")],
@@ -375,24 +380,24 @@ impl<C: Console> Session<C> {
         Ok(())
     }
 
-    /// Installs `image` from flash and returns once the device starts its
-    /// reload.
+    /// Installs an IOS-XE image from flash and returns once the device starts
+    /// its reload. The command is `install add file flash:{image} activate commit`.
     pub fn install(&mut self, image: &str) -> Result<(), SessionError> {
-        self.send(&format!("install add file flash:{image} activate commit"))?;
-        let (index, output) = self.answer_until(
-            &[INSTALL_FAILED, PROCEED],
-            &[(YES_NO, "no")],
-            INSTALL_WAIT,
-            "the install to ask to proceed",
-        )?;
-        if index == 0 {
-            return Err(install_failed(&output));
-        }
-        // The proceed question itself mentions a reload.
-        self.send("y")?;
+        self.run_install(&format!("install add file flash:{image} activate commit"))
+    }
+
+    /// Sends one install command and returns once the device starts its reload.
+    ///
+    /// `[yes/no]` is declined (the IOS-XE save question). `[y/n]` is accepted.
+    /// `[confirm]` is accepted with an empty line. A reload is `reloading`,
+    /// `reloaded`, `reboot`, or the IOS-XE `SUCCESS: install_add_activate_commit`
+    /// line. `reload` alone is not enough: the IOS-XE proceed question says
+    /// "may require a reload" before the technician has answered.
+    pub fn run_install(&mut self, command: &str) -> Result<(), SessionError> {
+        self.send(command)?;
         let (index, output) = self.answer_until(
             &[INSTALL_FAILED, INSTALL_RELOADING],
-            &[(PROCEED, "y"), (YES_NO, "no")],
+            &[(PROCEED, "y"), (YES_NO, "no"), (CONFIRM, "")],
             INSTALL_WAIT,
             "the install to reload the device",
         )?;
@@ -1107,5 +1112,16 @@ mod tests {
                 other => panic!("unexpected {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn run_install_returns_when_the_switch_is_reloaded_without_a_prompt() {
+        let command = "install all nxos bootflash:nxos.10.3.6.bin non-interactive";
+        let mut session = session(vec![(
+            command,
+            "\r\nCompatibility check is done.\r\nSwitch will be reloaded for disruptive upgrade.\r\n",
+        )]);
+        session.run_install(command).unwrap();
+        assert_eq!(written(&session), [command]);
     }
 }

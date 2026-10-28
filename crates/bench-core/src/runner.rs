@@ -1,16 +1,21 @@
 //! Carries out the run order on a device over its console session and keeps
 //! the run record, the reminder, and the port results.
 
+use crate::capwap::{capwap_apply_command, capwap_failure_detail, capwap_passed};
 use crate::config_check::missing_commands;
 use crate::export::{chassis_serial, ExportInput};
+use crate::family::DeviceFamily;
 use crate::firmware::{firmware_check, version_token, FirmwareCheck};
 use crate::login::{login_after_apply, FactorySecrets, NextLogin};
 use crate::phase::{next_phase, port_walk_available, start_phase, Phase, PhaseEvent};
-use crate::ports::{first_physical, physical_interfaces, router_port_passed, switch_port_passed};
+use crate::ports::{first_physical, physical_interfaces};
 use crate::run::{CheckStatus, RunOptions, RunRecord};
 use crate::session::{Console, Session, SessionError};
-use crate::transfer::{assign_address_commands, copy_tftp_command, LinkKind};
+use crate::strategy::strategy_for;
+use crate::transfer::LinkKind;
 use crate::uptime::{burn_in_passes, parse_uptime_lines};
+
+const SHOW_CAPWAP: &str = "show capwap client config";
 
 const SWITCH_MARKERS: [&str; 3] = ["cisco c9", "cisco ie-", "switch ports model"];
 
@@ -54,6 +59,7 @@ enum Check {
     Configuration,
     Firmware,
     BurnIn,
+    Capwap,
 }
 
 /// One bench run on one device.
@@ -86,11 +92,24 @@ impl<C: Console> Runner<C> {
                 CheckStatus::NotChosen
             }
         };
+        let access_point = options.family == DeviceFamily::AccessPoint;
         let record = RunRecord {
-            configuration: CheckStatus::NotFinished,
+            configuration: if access_point {
+                CheckStatus::NotChosen
+            } else {
+                CheckStatus::NotFinished
+            },
             firmware: chosen(options.firmware.is_some()),
-            burn_in: chosen(options.burn_in_hours.is_some()),
-            ports: chosen(options.port_testing),
+            burn_in: if access_point {
+                CheckStatus::NotChosen
+            } else {
+                chosen(options.burn_in_hours.is_some())
+            },
+            ports: if access_point {
+                CheckStatus::NotChosen
+            } else {
+                chosen(options.port_testing)
+            },
             capwap: chosen(options.capwap.is_some()),
         };
         Self {
@@ -189,15 +208,13 @@ impl<C: Console> Runner<C> {
                 "{name} is not one of the ports to check."
             )));
         };
-        let (passed, failure) = match self.kind {
-            LinkKind::Switch => {
-                let status = self.session.exec("show interface status")?;
-                (switch_port_passed(&status, name), SWITCH_PORT_DOWN)
-            }
-            LinkKind::Router => {
-                let interface = self.session.exec(&format!("show interfaces {name}"))?;
-                (router_port_passed(&interface, name), ROUTER_PORT_DOWN)
-            }
+        let strategy = strategy_for(self.options.family);
+        let command = strategy.port_status_command(self.kind, name);
+        let status = self.session.exec(&command)?;
+        let passed = strategy.port_passed(self.kind, name, &status);
+        let failure = match self.kind {
+            LinkKind::Switch => SWITCH_PORT_DOWN,
+            LinkKind::Router => ROUTER_PORT_DOWN,
         };
         self.ports[index].1 = if passed {
             CheckStatus::Passed
@@ -219,6 +236,14 @@ impl<C: Console> Runner<C> {
             }
             _ => self.ports.clone(),
         };
+        let (capwap_ip, capwap_mask, capwap_gateway) = match &self.options.capwap {
+            Some(choice) => (
+                Some(choice.ip.clone()),
+                Some(choice.mask.clone()),
+                Some(choice.gateway.clone()),
+            ),
+            None => (None, None, None),
+        };
         ExportInput {
             hostname: self.session.hostname().to_string(),
             serial: self.serial.clone().unwrap_or_else(|| NO_SERIAL.into()),
@@ -231,10 +256,10 @@ impl<C: Console> Runner<C> {
             uptime_line: self.uptime_line.clone(),
             burn_in: self.record.burn_in.clone(),
             ports,
-            capwap: CheckStatus::NotChosen,
-            capwap_ip: None,
-            capwap_mask: None,
-            capwap_gateway: None,
+            capwap: self.record.capwap.clone(),
+            capwap_ip,
+            capwap_mask,
+            capwap_gateway,
         }
     }
 
@@ -247,15 +272,14 @@ impl<C: Console> Runner<C> {
                 }
             }
             Phase::CopyImage => self.copy_image()?,
-            Phase::InstallAndReboot => {
-                self.session.install(&self.image_name())?;
-                self.send(PhaseEvent::Rebooted);
-            }
+            Phase::InstallAndReboot => self.install_image()?,
             Phase::ConfirmVersion => self.confirm_version()?,
-            Phase::ApplyCapwap | Phase::ValidateCapwap => {}
+            Phase::ApplyCapwap => self.apply_capwap()?,
+            Phase::ValidateCapwap => self.validate_capwap()?,
             Phase::ApplyConfig => self.apply_config()?,
             Phase::SaveAndReboot => {
-                self.session.save()?;
+                let command = strategy_for(self.options.family).save_startup_command();
+                self.session.save_startup(command)?;
                 self.send(PhaseEvent::Saved);
                 self.session.reload()?;
                 self.send(PhaseEvent::Rebooted);
@@ -279,13 +303,15 @@ impl<C: Console> Runner<C> {
     }
 
     fn login(&mut self) -> Result<(), SessionError> {
+        let strategy = strategy_for(self.options.family);
         self.reminder = self.session.login_factory()?;
-        let version = self.session.exec("show version")?;
+        let version = self.session.exec(strategy.show_version_command())?;
         self.kind = device_kind(&version);
         let inventory = self.session.exec("show inventory")?;
         self.serial = chassis_serial(&inventory, &version);
-        let names = interface_names(&self.session.exec("show ip interface brief")?);
-        if self.options.port_testing {
+        let listed = self.session.exec(strategy.list_interfaces_command())?;
+        let names = strategy.parse_interface_names(&listed);
+        if self.options.port_testing && self.options.family != DeviceFamily::AccessPoint {
             self.ports = physical_interfaces(&names)
                 .into_iter()
                 .map(|name| (name, CheckStatus::NotFinished))
@@ -313,23 +339,37 @@ impl<C: Console> Runner<C> {
             self.stop(Check::Firmware, NO_VERSION.into(), NO_VERSION.into());
             return Ok(());
         }
+        let strategy = strategy_for(self.options.family);
         let port = self.tftp_port.clone().unwrap_or_default();
         let rejected = self
             .session
-            .configure(&assign_address_commands(self.kind, &port))?;
+            .configure(&strategy.assign_address_commands(self.kind, &port))?;
         if !rejected.is_empty() {
             let reason = listed(REJECTED_ADDRESS, &rejected);
             self.stop(Check::Firmware, rejected.join("\n"), reason);
             return Ok(());
         }
-        self.session.copy_image(&copy_tftp_command(&image))?;
+        self.session
+            .copy_image(&strategy.copy_tftp_command(&image))?;
         self.send(PhaseEvent::ImageOnFlash);
+        Ok(())
+    }
+
+    fn install_image(&mut self) -> Result<(), SessionError> {
+        let image = self.image_name();
+        let commands = strategy_for(self.options.family).install_and_reload_commands(&image);
+        for command in &commands {
+            self.session.run_install(command)?;
+        }
+        self.send(PhaseEvent::Rebooted);
         Ok(())
     }
 
     fn confirm_version(&mut self) -> Result<(), SessionError> {
         self.reminder = self.session.login_factory()?;
-        let version = self.session.exec("show version")?;
+        let version = self
+            .session
+            .exec(strategy_for(self.options.family).show_version_command())?;
         let image = self.image_name();
         if firmware_check(&image, &version) == FirmwareCheck::Pass {
             self.running_version = Some(version.trim().to_string());
@@ -365,11 +405,43 @@ impl<C: Console> Runner<C> {
         Ok(())
     }
 
+    fn apply_capwap(&mut self) -> Result<(), SessionError> {
+        let Some(choice) = self.options.capwap.clone() else {
+            let reason = "CAPWAP was not chosen for this run.".to_string();
+            self.stop(Check::Capwap, reason.clone(), reason);
+            return Ok(());
+        };
+        self.session.exec(&capwap_apply_command(&choice))?;
+        self.send(PhaseEvent::CapwapApplied);
+        Ok(())
+    }
+
+    fn validate_capwap(&mut self) -> Result<(), SessionError> {
+        let Some(choice) = self.options.capwap.clone() else {
+            let reason = "CAPWAP was not chosen for this run.".to_string();
+            self.stop(Check::Capwap, reason.clone(), reason);
+            return Ok(());
+        };
+        let show = self.session.exec(SHOW_CAPWAP)?;
+        if capwap_passed(&show, &choice) {
+            self.record.capwap = CheckStatus::Passed;
+            self.send(PhaseEvent::CapwapValidated);
+        } else {
+            let detail = capwap_failure_detail(&show, &choice);
+            let reason = format!("show capwap client config is missing {detail}.\n{show}");
+            self.fail(Check::Capwap, detail, reason);
+            self.send(PhaseEvent::CapwapFailed);
+        }
+        Ok(())
+    }
+
     fn validate_config(&mut self) -> Result<(), SessionError> {
         let login = self.next_login();
         self.session.login_with(&login)?;
         self.send(PhaseEvent::LoggedIn);
-        let running = self.session.exec("show running-config")?;
+        let running = self
+            .session
+            .exec(strategy_for(self.options.family).show_running_config_command())?;
         let missing = missing_commands(&self.files.config_body, &running);
         if missing.is_empty() {
             self.record.configuration = CheckStatus::Passed;
@@ -383,7 +455,9 @@ impl<C: Console> Runner<C> {
     }
 
     fn read_uptime(&mut self) -> Result<(), SessionError> {
-        let output = self.session.exec("show version | include uptime")?;
+        let output = self
+            .session
+            .exec(strategy_for(self.options.family).show_uptime_command())?;
         let lines: Vec<String> = output
             .lines()
             .map(str::trim)
@@ -392,7 +466,12 @@ impl<C: Console> Runner<C> {
             .collect();
         self.uptime_line = lines.first().cloned();
         let hours = self.options.burn_in_hours.unwrap_or_default();
-        if burn_in_passes(hours, &parse_uptime_lines(&output)) {
+        let parsed = if self.options.family == DeviceFamily::Nxos {
+            crate::strategy_nxos::parse_uptime(&output)
+        } else {
+            parse_uptime_lines(&output)
+        };
+        if burn_in_passes(hours, &parsed) {
             self.record.burn_in = CheckStatus::Passed;
             self.send(PhaseEvent::UptimePassed);
         } else {
@@ -424,6 +503,7 @@ impl<C: Console> Runner<C> {
             | Phase::CopyImage
             | Phase::InstallAndReboot
             | Phase::ConfirmVersion => Check::Firmware,
+            Phase::ApplyCapwap | Phase::ValidateCapwap => Check::Capwap,
             Phase::WaitBurnIn | Phase::ReadUptime => Check::BurnIn,
             Phase::CleanReboot if self.options.burn_in_hours.is_some() => Check::BurnIn,
             _ => Check::Configuration,
@@ -441,6 +521,7 @@ impl<C: Console> Runner<C> {
             Check::Configuration => &mut self.record.configuration,
             Check::Firmware => &mut self.record.firmware,
             Check::BurnIn => &mut self.record.burn_in,
+            Check::Capwap => &mut self.record.capwap,
         };
         *status = CheckStatus::Failed { detail };
         self.stop_reason = Some(reason);
@@ -450,16 +531,6 @@ impl<C: Console> Runner<C> {
         self.fail(check, detail, reason);
         self.phase = Phase::Stopped;
     }
-}
-
-/// The first column of `show ip interface brief`, without its header.
-fn interface_names(brief: &str) -> Vec<String> {
-    brief
-        .lines()
-        .filter(|line| !line.starts_with("Interface"))
-        .filter_map(|line| line.split_whitespace().next())
-        .map(String::from)
-        .collect()
 }
 
 /// Passed when there are ports and every one passed, failed when any port
@@ -492,9 +563,13 @@ fn listed(heading: &str, lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capwap::{capwap_apply_command, capwap_failure_detail};
     use crate::export::export_text;
+    use crate::family::{CapwapChoice, DeviceFamily};
     use crate::run::FirmwareChoice;
     use crate::scripted::ScriptedConsole;
+    use crate::strategy::strategy_for;
+    use crate::transfer::copy_tftp_command;
 
     const BODY: &str =
         "hostname closet-2-sw1\ninterface GigabitEthernet1/0/1\n switchport access vlan 20\n";
@@ -1290,5 +1365,264 @@ mod tests {
             Err(SessionError::Stopped(_))
         ));
         assert_eq!(writes(&done), done_writes);
+    }
+
+    fn capwap_choice() -> CapwapChoice {
+        CapwapChoice {
+            ip: "10.1.1.10".into(),
+            mask: "255.255.255.0".into(),
+            gateway: "10.1.1.1".into(),
+        }
+    }
+
+    fn ap_options(capwap: Option<CapwapChoice>) -> RunOptions {
+        RunOptions {
+            serial_device: "/dev/cu.usbserial-1420".into(),
+            config_path: String::new(),
+            family: DeviceFamily::AccessPoint,
+            firmware: None,
+            burn_in_hours: None,
+            port_testing: false,
+            capwap,
+        }
+    }
+
+    fn ap_login() -> Steps {
+        let version = "Cisco AP Software, Version 17.12.5\r\nProcessor board ID FJC2345A0AB";
+        [
+            open_factory_login(),
+            inspect(version, INVENTORY, &["BVI1", "GigabitEthernet0"]),
+        ]
+        .concat()
+    }
+
+    fn ap_runner(show_capwap: &str) -> Runner<ScriptedConsole> {
+        let choice = capwap_choice();
+        let command = capwap_apply_command(&choice);
+        let steps = [
+            ap_login(),
+            vec![
+                exec(&command, "", "AP"),
+                exec("show capwap client config", show_capwap, "AP"),
+            ],
+        ]
+        .concat();
+        runner(ap_options(Some(choice)), "", steps)
+    }
+
+    fn nxos_options(image: Option<&str>, burn_in_hours: Option<u32>) -> RunOptions {
+        RunOptions {
+            serial_device: "/dev/cu.usbserial-1420".into(),
+            config_path: "/bench/closet-access.cfg".into(),
+            family: DeviceFamily::Nxos,
+            firmware: image.map(|image| FirmwareChoice {
+                image_path: format!("/bench/{image}"),
+                local_ethernet: "en5".into(),
+            }),
+            burn_in_hours,
+            port_testing: false,
+            capwap: None,
+        }
+    }
+
+    fn nxos_login() -> Steps {
+        let version = "Cisco Nexus Operating System (NX-OS) Software\r\nNXOS: version 10.2.5";
+        let brief = "\
+--------------------------------------------------------------------------------
+Ethernet      VLAN    Type Mode   Status  Reason                   Speed     Port
+Interface                                                                    Ch #
+--------------------------------------------------------------------------------
+Eth1/1        1       eth  routed up      none                       10G(D)  --
+";
+        [
+            open_factory_login(),
+            vec![
+                exec("show version", version, "Switch"),
+                exec("show inventory", INVENTORY, "Switch"),
+                exec("show interface brief", brief, "Switch"),
+            ],
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn access_point_starts_with_switch_checks_not_chosen() {
+        let runner = ap_runner(
+            "IP Address: 10.1.1.10\r\nNetmask: 255.255.255.0\r\nDefault Gateway: 10.1.1.1",
+        );
+        assert_eq!(runner.record().configuration, CheckStatus::NotChosen);
+        assert_eq!(runner.record().firmware, CheckStatus::NotChosen);
+        assert_eq!(runner.record().burn_in, CheckStatus::NotChosen);
+        assert_eq!(runner.record().ports, CheckStatus::NotChosen);
+        assert_eq!(runner.record().capwap, CheckStatus::NotFinished);
+    }
+
+    #[test]
+    fn access_point_capwap_only_run_passes() {
+        let show = "IP Address: 10.1.1.10\r\nNetmask: 255.255.255.0\r\nDefault Gateway: 10.1.1.1";
+        let mut runner = ap_runner(show);
+        assert_eq!(drive(&mut runner), Phase::Done);
+        assert_eq!(runner.record().capwap, CheckStatus::Passed);
+        assert_eq!(runner.record().configuration, CheckStatus::NotChosen);
+        assert_eq!(runner.stop_reason(), None);
+        let input = runner.export_input();
+        assert_eq!(input.capwap, CheckStatus::Passed);
+        assert_eq!(input.capwap_ip.as_deref(), Some("10.1.1.10"));
+        assert_eq!(input.capwap_mask.as_deref(), Some("255.255.255.0"));
+        assert_eq!(input.capwap_gateway.as_deref(), Some("10.1.1.1"));
+        assert_eq!(input.configuration, CheckStatus::NotChosen);
+        let text = export_text(&input);
+        assert!(text.contains("CAPWAP result: Passed\n"));
+        assert!(!text.contains("\nConfiguration\n"));
+        let written = runner.session().console().written();
+        let apply = capwap_apply_command(&capwap_choice());
+        let apply_at = written.iter().position(|w| w == &apply);
+        let show_at = written
+            .iter()
+            .position(|w| w == "show capwap client config");
+        assert!(apply_at.unwrap() < show_at.unwrap());
+        assert!(crate::run::export_available(
+            DeviceFamily::AccessPoint,
+            runner.record()
+        ));
+    }
+
+    #[test]
+    fn access_point_wrong_capwap_stops_failed() {
+        let show = "IP Address: 10.9.9.9\r\nNetmask: 255.255.255.0\r\nDefault Gateway: 10.1.1.1";
+        let mut runner = ap_runner(show);
+        assert_eq!(drive(&mut runner), Phase::Stopped);
+        let detail = capwap_failure_detail(show, &capwap_choice());
+        assert!(detail.contains("IP"));
+        assert!(matches!(
+            &runner.record().capwap,
+            CheckStatus::Failed { detail: got } if got.contains("IP") && !got.contains("mask")
+        ));
+        assert_eq!(runner.record().configuration, CheckStatus::NotChosen);
+        assert_eq!(runner.record().firmware, CheckStatus::NotChosen);
+        assert!(runner
+            .stop_reason()
+            .is_some_and(|reason| reason.contains("IP")));
+        assert!(!crate::run::export_available(
+            DeviceFamily::AccessPoint,
+            runner.record()
+        ));
+    }
+
+    #[test]
+    fn abort_during_capwap_fails_capwap_not_configuration() {
+        let mut runner = runner(ap_options(Some(capwap_choice())), "", ap_login());
+        assert_eq!(runner.advance(), Phase::ApplyCapwap);
+        runner.abort("The serial device closed.");
+        assert_eq!(runner.phase(), Phase::Stopped);
+        assert_eq!(runner.record().configuration, CheckStatus::NotChosen);
+        assert_eq!(
+            runner.record().capwap,
+            CheckStatus::Failed {
+                detail: "The serial device closed.".into()
+            }
+        );
+    }
+
+    #[test]
+    fn nxos_config_only_validates_with_the_family_show_commands() {
+        let steps = [nxos_login(), config_steps(ok_running_config(), None)].concat();
+        let mut runner = runner(nxos_options(None, None), BODY, steps);
+        assert_eq!(drive(&mut runner), Phase::Done);
+        assert_eq!(runner.record().configuration, CheckStatus::Passed);
+        assert_eq!(runner.record().capwap, CheckStatus::NotChosen);
+        let strategy = strategy_for(DeviceFamily::Nxos);
+        let written = runner.session().console().written();
+        assert!(written
+            .iter()
+            .any(|w| w == strategy.list_interfaces_command()));
+        assert!(written
+            .iter()
+            .any(|w| w == strategy.show_running_config_command()));
+        assert!(!written.iter().any(|w| w == "show ip interface brief"));
+        assert!(!written.iter().any(|w| w == "no switchport"));
+        assert!(crate::run::export_available(
+            DeviceFamily::Nxos,
+            runner.record()
+        ));
+    }
+
+    #[test]
+    fn nxos_burn_in_parses_parenthesized_uptime_units() {
+        let uptime = "Kernel uptime is 0 day(s), 4 hour(s), 6 minute(s)";
+        let steps = [
+            nxos_login(),
+            config_steps(ok_running_config(), None),
+            vec![exec(
+                "show version | include uptime",
+                uptime,
+                "closet-2-sw1",
+            )],
+        ]
+        .concat();
+        let mut runner = runner(nxos_options(None, Some(4)), BODY, steps);
+        assert_eq!(drive(&mut runner), Phase::WaitBurnIn);
+        runner.finish_wait();
+        assert_eq!(drive(&mut runner), Phase::Done);
+        assert_eq!(runner.record().burn_in, CheckStatus::Passed);
+        assert_eq!(runner.record().configuration, CheckStatus::Passed);
+        assert_eq!(runner.export_input().uptime_line.as_deref(), Some(uptime));
+    }
+
+    #[test]
+    fn nxos_firmware_uses_strategy_address_copy_and_install() {
+        let image = "nxos.10.3.6.bin";
+        let strategy = strategy_for(DeviceFamily::Nxos);
+        let copy = strategy.copy_tftp_command(image);
+        let install = strategy.install_and_reload_commands(image);
+        let address = strategy.assign_address_commands(LinkKind::Router, "Eth1/1");
+        let mut address_steps = Vec::new();
+        for (index, command) in address.iter().enumerate() {
+            let output = if index == 0 {
+                "\r\nSwitch(config)#"
+            } else if index + 1 == address.len() {
+                "\r\nSwitch#"
+            } else if index + 2 == address.len() {
+                "\r\nSwitch(config-if)#"
+            } else {
+                "\r\nSwitch(config-if)#"
+            };
+            address_steps.push(step(command, output));
+        }
+        let version_after = "Cisco Nexus Operating System (NX-OS) Software\r\nNXOS: version 10.3.6";
+        let steps = [
+            nxos_login(),
+            address_steps,
+            vec![
+                step(&copy, &format!("\r\nDestination filename [{image}]? ")),
+                step(
+                    "",
+                    &format!("\r\nAccessing tftp://192.0.2.1/{image}...\r\n[OK - 1234567 bytes]\r\n\r\n1234567 bytes copied in 80.0 secs\r\nSwitch#"),
+                ),
+                step(
+                    &install[0],
+                    "\r\nSwitch will be reloaded for disruptive upgrade.\r\n",
+                ),
+            ],
+            enable_secret_factory_login(),
+            vec![exec("show version", version_after, "Switch")],
+            config_steps(ok_running_config(), Some("cisco")),
+        ]
+        .concat();
+        let mut runner = runner(nxos_options(Some(image), None), BODY, steps);
+        assert_eq!(drive(&mut runner), Phase::NameTftpPort);
+        assert_eq!(runner.tftp_port(), Some("Eth1/1"));
+        runner.confirm_cable();
+        assert_eq!(drive(&mut runner), Phase::Done);
+        assert_eq!(runner.record().firmware, CheckStatus::Passed);
+        assert_eq!(runner.record().configuration, CheckStatus::Passed);
+        let written = runner.session().console().written();
+        assert!(written.iter().any(|w| w == &copy));
+        assert!(written.iter().any(|w| w == &install[0]));
+        assert!(!written.iter().any(|w| w.contains("no switchport")));
+        assert!(!written.iter().any(|w| w.starts_with("install add file")));
+        assert!(!written
+            .iter()
+            .any(|w| w.contains("ip tftp source-interface")));
     }
 }
