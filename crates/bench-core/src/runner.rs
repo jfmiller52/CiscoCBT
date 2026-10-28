@@ -181,7 +181,7 @@ impl<C: Console> Runner<C> {
         if !self.options.port_testing {
             return Err(SessionError::Stopped(NO_PORT_TESTING.into()));
         }
-        if !port_walk_available(self.phase) {
+        if !port_walk_available(self.phase, self.options.family) {
             return Err(SessionError::Stopped(NO_PORT_WALK.into()));
         }
         let Some(index) = self.ports.iter().position(|(port, _)| port == name) else {
@@ -248,6 +248,7 @@ impl<C: Console> Runner<C> {
                 self.send(PhaseEvent::Rebooted);
             }
             Phase::ConfirmVersion => self.confirm_version()?,
+            Phase::ApplyCapwap | Phase::ValidateCapwap => {}
             Phase::ApplyConfig => self.apply_config()?,
             Phase::SaveAndReboot => {
                 self.session.save()?;

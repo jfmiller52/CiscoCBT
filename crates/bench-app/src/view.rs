@@ -77,7 +77,7 @@ pub fn screen_for(state: &ViewState) -> Screen {
         Some(Phase::NameTftpPort) => Screen::CablePrompt,
         Some(phase)
             if state.form.port_testing
-                && port_walk_available(phase)
+                && port_walk_available(phase, state.form.family)
                 && state.current_port.is_some() =>
         {
             Screen::PortWalk
