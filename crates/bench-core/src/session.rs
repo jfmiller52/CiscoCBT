@@ -68,6 +68,9 @@ const LOGIN_REFUSED: &str =
 const CONFIG_REJECTION: &str = r"(?i)^\s*%\s*(invalid|incomplete|ambiguous|unknown|unrecognized|error|bad|cannot|not allowed|command rejected)";
 const DESTINATION: &str = r"(?i)destination filename \[[^\]\n]*\]\?";
 const OVERWRITE: &str = r"(?i)do you want to over write\? \[confirm\]";
+/// Nexus copy when the bootflash file already exists. Parentheses, default `n`.
+/// An empty line keeps the old file, so the copy answers `y`.
+const NXOS_OVERWRITE: &str = r"(?i)\(y/n\)";
 const SAVE_QUESTION: &str = r"(?i)save\? \[yes/no\]";
 const CONFIRM: &str = r"(?i)\[confirm\]";
 /// Nexus reload: `This command will reboot the system. (y/n)? [n]`.
@@ -76,7 +79,7 @@ const NXOS_RELOAD: &str = r"(?i)\(y/n\)\?\s*\[n\]";
 const PROCEED: &str = r"(?i)\[y/n\]";
 const YES_NO: &str = r"(?i)\[yes/no\]";
 const INSTALL_FAILED: &str = r"(?im)^.*(FAILED|%Error|Invalid input).*$";
-const INSTALL_RELOADING: &str = r"(?i)\breloading\b|\brebooting\b|\breloaded\b|\breboot\b|reload requested|initiating reload|requested system reload|SUCCESS:\s*install_add_activate_commit";
+const INSTALL_RELOADING: &str = r"(?i)\breloading\b|\brebooting\b|\breloaded\b|\breboot\b|\bwill reload\b|reload requested|initiating reload|requested system reload|SUCCESS:\s*install_add_activate_commit";
 
 /// What a login read saw.
 #[derive(Debug, Clone, Copy)]
@@ -369,11 +372,15 @@ impl<C: Console> Session<C> {
         self.send(answer)
     }
 
+    /// Copies an image. IOS asks for a destination filename and
+    /// `Do you want to over write? [confirm]`; both take an empty line.
+    /// NX-OS asks `(y/n)` with default `n` when that bootflash name already
+    /// exists. An empty line keeps the old file, so the answer is `y`.
     pub fn copy_image(&mut self, command: &str) -> Result<(), SessionError> {
         self.send(command)?;
         let (_, output) = self.answer_until(
             &[PRIVILEGED],
-            &[(DESTINATION, ""), (OVERWRITE, "")],
+            &[(DESTINATION, ""), (OVERWRITE, ""), (NXOS_OVERWRITE, "y")],
             COPY_WAIT,
             "the device prompt after the image copy",
         )?;
@@ -400,9 +407,12 @@ impl<C: Console> Session<C> {
     ///
     /// `[yes/no]` is declined (the IOS-XE save question). `[y/n]` is accepted.
     /// `[confirm]` is accepted with an empty line. A reload is `reloading`,
-    /// `reloaded`, `reboot`, or the IOS-XE `SUCCESS: install_add_activate_commit`
-    /// line. `reload` alone is not enough: the IOS-XE proceed question says
-    /// "may require a reload" before the technician has answered.
+    /// `reloaded`, `reboot`, `will reload` (the access-point
+    /// `archive download-sw` line, as in "device will reload"), or the IOS-XE
+    /// `SUCCESS: install_add_activate_commit` line. `reload` alone is not
+    /// enough: the IOS-XE proceed question says "may require a reload" before
+    /// the technician has answered, and that sentence does not contain
+    /// `will reload`.
     pub fn run_install(&mut self, command: &str) -> Result<(), SessionError> {
         self.send(command)?;
         let (index, output) = self.answer_until(
@@ -1105,6 +1115,23 @@ mod tests {
     }
 
     #[test]
+    fn copy_image_answers_y_to_a_nexus_overwrite() {
+        let command = "copy tftp://192.0.2.1/nxos.10.3.6.bin bootflash:nxos.10.3.6.bin";
+        let mut session = session(vec![
+            (
+                command,
+                "\r\nnxos.10.3.6.bin already exists, overwrite? (y/n) [n] ",
+            ),
+            (
+                "y",
+                "\r\nTFTP get operation was successful\r\nCopy complete, now saving to disk (please wait)...\r\nswitch#",
+            ),
+        ]);
+        session.copy_image(command).unwrap();
+        assert_eq!(written(&session), [command, "y"]);
+    }
+
+    #[test]
     fn copy_image_stops_on_an_error_or_without_bytes_copied() {
         let command = "copy tftp://192.0.2.1/image.17.12.05.bin flash:";
         for (output, reason_part) in [
@@ -1180,5 +1207,37 @@ mod tests {
         )]);
         session.run_install(command).unwrap();
         assert_eq!(written(&session), [command]);
+    }
+
+    #[test]
+    fn access_point_install_finishes_on_device_will_reload_then_reads_the_factory_login() {
+        let command = "archive download-sw /overwrite /reload flash:ap3g3-k9w8.17.12.05.tar";
+        let mut session = session(vec![
+            (
+                command,
+                "archive download-sw /overwrite /reload flash:ap3g3-k9w8.17.12.05.tar\r\nexamining image...\r\nThis operation may require a reload of the system.\r\nImage download complete.\r\nDevice will reload.\r\n\r\nWould you like to enter the initial configuration dialog? [yes/no]: ",
+            ),
+            ("", ""),
+            ("no", "\r\nAP>"),
+            ("enable", "\r\nAP#"),
+            ("terminal length 0", "\r\nAP#"),
+        ]);
+        session.run_install(command).unwrap();
+        let during_install = session.transcript();
+        assert!(during_install.contains("may require a reload"));
+        assert!(during_install.contains("Device will reload"));
+        assert!(!during_install
+            .to_ascii_lowercase()
+            .contains("initial configuration dialog"));
+        assert_eq!(written(&session), [command]);
+        session.login_factory().unwrap();
+        assert!(session
+            .transcript()
+            .to_ascii_lowercase()
+            .contains("initial configuration dialog"));
+        assert_eq!(
+            written(&session),
+            [command, "", "no", "enable", "terminal length 0"]
+        );
     }
 }

@@ -22,6 +22,7 @@ const SWITCH_MARKERS: [&str; 3] = ["cisco c9", "cisco ie-", "switch ports model"
 const NO_IMAGE_PORT: &str = "No physical interface was found for the image cable.";
 const NO_VERSION: &str = "The image file name has no version number.";
 const REJECTED_ADDRESS: &str = "The device rejected the temporary address for the image copy:";
+const REJECTED_CLEAR: &str = "The device rejected clearing the temporary address:";
 const UNTYPABLE_LOGIN: &str =
     "The configuration would leave the console behind a password this program cannot type:";
 const REJECTED_CONFIG: &str = "The device rejected these configuration lines:";
@@ -351,6 +352,21 @@ impl<C: Console> Runner<C> {
         }
         self.session
             .copy_image(&strategy.copy_tftp_command(&image))?;
+        // `install all … non-interactive` copies running-config to startup
+        // before it reboots, so the bench address would remain on a released
+        // Nexus. IOS-XE declines that save, and the AP install does not write
+        // this address into startup.
+        if self.options.family == DeviceFamily::Nxos {
+            let port = self.tftp_port.clone().unwrap_or_default();
+            let rejected = self
+                .session
+                .configure(&strategy.clear_address_commands(&port))?;
+            if !rejected.is_empty() {
+                let reason = listed(REJECTED_CLEAR, &rejected);
+                self.stop(Check::Firmware, rejected.join("\n"), reason);
+                return Ok(());
+            }
+        }
         self.send(PhaseEvent::ImageOnFlash);
         Ok(())
     }
@@ -755,6 +771,26 @@ mod tests {
             inspect(SWITCH_VERSION, INVENTORY, &SWITCH_NAMES),
         ]
         .concat()
+    }
+
+    /// Configuration lines as `configure` writes them: the list's
+    /// `configure terminal` and `end`, with a config prompt on every line
+    /// except the last.
+    fn config_dialogue(commands: &[String]) -> Steps {
+        commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| {
+                let output = if index == 0 {
+                    "\r\nSwitch(config)#"
+                } else if index + 1 == commands.len() {
+                    "\r\nSwitch#"
+                } else {
+                    "\r\nSwitch(config-if)#"
+                };
+                step(command, output)
+            })
+            .collect()
     }
 
     fn address_and_copy(image: &str) -> Steps {
@@ -1638,33 +1674,20 @@ Eth1/1        1       eth  routed up      none                       10G(D)  --
         let copy = strategy.copy_tftp_command(image);
         let install = strategy.install_and_reload_commands(image);
         let address = strategy.assign_address_commands(LinkKind::Router, "Eth1/1");
-        let mut address_steps = Vec::new();
-        for (index, command) in address.iter().enumerate() {
-            let output = if index == 0 {
-                "\r\nSwitch(config)#"
-            } else if index + 1 == address.len() {
-                "\r\nSwitch#"
-            } else if index + 2 == address.len() {
-                "\r\nSwitch(config-if)#"
-            } else {
-                "\r\nSwitch(config-if)#"
-            };
-            address_steps.push(step(command, output));
-        }
+        let clear = strategy.clear_address_commands("Eth1/1");
         let version_after = "Cisco Nexus Operating System (NX-OS) Software\r\nNXOS: version 10.3.6";
         let steps = [
             nxos_login(),
-            address_steps,
-            vec![
-                step(
-                    &copy,
-                    "\r\nTFTP get operation was successful\r\nCopy complete, now saving to disk (please wait)...\r\nSwitch#",
-                ),
-                step(
-                    &install[0],
-                    "\r\nSwitch will be reloaded for disruptive upgrade.\r\n",
-                ),
-            ],
+            config_dialogue(&address),
+            vec![step(
+                &copy,
+                "\r\nTFTP get operation was successful\r\nCopy complete, now saving to disk (please wait)...\r\nSwitch#",
+            )],
+            config_dialogue(&clear),
+            vec![step(
+                &install[0],
+                "\r\nSwitch will be reloaded for disruptive upgrade.\r\n",
+            )],
             enable_secret_factory_login(),
             vec![exec("show version", version_after, "Switch")],
             nxos_config_steps(ok_running_config(), Some("cisco")),
@@ -1680,10 +1703,64 @@ Eth1/1        1       eth  routed up      none                       10G(D)  --
         let written = runner.session().console().written();
         assert!(written.iter().any(|w| w == &copy));
         assert!(written.iter().any(|w| w == &install[0]));
+        let copy_at = written.iter().position(|w| w == &copy).unwrap();
+        let clear_at = written.iter().position(|w| w == "no ip address").unwrap();
+        let install_at = written.iter().position(|w| w == &install[0]).unwrap();
+        assert!(copy_at < clear_at && clear_at < install_at);
         assert!(!written.iter().any(|w| w.contains("no switchport")));
         assert!(!written.iter().any(|w| w.starts_with("install add file")));
         assert!(!written
             .iter()
             .any(|w| w.contains("ip tftp source-interface")));
+    }
+
+    #[test]
+    fn access_point_firmware_then_capwap_finishes_on_device_will_reload() {
+        let image = "ap3g3-k9w8.17.12.05.tar";
+        let strategy = strategy_for(DeviceFamily::AccessPoint);
+        let copy = strategy.copy_tftp_command(image);
+        let install = strategy.install_and_reload_commands(image);
+        let address = strategy.assign_address_commands(LinkKind::Router, "GigabitEthernet0");
+        let version_after = "Cisco AP Software, Version 17.12.05\r\nProcessor board ID FJC2345A0AB";
+        let show = "IP Address: 10.1.1.10\r\nNetmask: 255.255.255.0\r\nDefault Gateway: 10.1.1.1";
+        let apply = capwap_apply_command(&capwap_choice());
+        let steps = [
+            ap_login(),
+            config_dialogue(&address),
+            vec![
+                step(
+                    &copy,
+                    &format!("\r\nAccessing tftp://192.0.2.1/{image}...\r\n[OK - 1234567 bytes]\r\n\r\n1234567 bytes copied in 12 secs\r\nSwitch#"),
+                ),
+                step(
+                    &install[0],
+                    "archive download-sw /overwrite /reload flash:ap3g3-k9w8.17.12.05.tar\r\nexamining image...\r\nThis operation may require a reload of the system.\r\nDevice will reload.\r\n",
+                ),
+            ],
+            open_factory_login(),
+            vec![
+                exec("show version", version_after, "Switch"),
+                exec(&apply, "", "Switch"),
+                exec("show capwap client config", show, "Switch"),
+            ],
+        ]
+        .concat();
+        let mut options = ap_options(Some(capwap_choice()));
+        options.firmware = Some(FirmwareChoice {
+            image_path: format!("/bench/{image}"),
+            local_ethernet: "en5".into(),
+        });
+        let mut runner = runner(options, "", steps);
+        assert_eq!(drive(&mut runner), Phase::NameTftpPort);
+        runner.confirm_cable();
+        assert_eq!(drive(&mut runner), Phase::Done);
+        assert_eq!(runner.record().firmware, CheckStatus::Passed);
+        assert_eq!(runner.record().capwap, CheckStatus::Passed);
+        let written = runner.session().console().written();
+        let install_at = written.iter().position(|w| w == &install[0]).unwrap();
+        let apply_at = written.iter().position(|w| w == &apply).unwrap();
+        assert!(install_at < apply_at);
+        assert_eq!(written[install_at + 1], "");
+        assert_eq!(apply, "capwap ap ip 10.1.1.10 255.255.255.0 10.1.1.1");
     }
 }
