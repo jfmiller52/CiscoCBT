@@ -166,13 +166,13 @@ cargo test -p bench-app
 cargo run -p bench-app
 ```
 
-IOS-XE design: [`docs/superpowers/specs/2026-10-28-ios-xe-bench-design.md`](docs/superpowers/specs/2026-10-28-ios-xe-bench-design.md). Plan: [`docs/superpowers/plans/2026-10-28-ios-xe-bench.md`](docs/superpowers/plans/2026-10-28-ios-xe-bench.md).
+
 
 NX-OS and access-point commands are the headers of `crates/bench-core/src/strategy_nxos.rs` and `strategy_ap.rs`, with the matching tests in `strategy.rs`. IOS-XE install is the header of `strategy_iosxe.rs`.
 
 Screenshot fixtures (same CSS as the app) are under `docs/images/screens/` if you need to regenerate PNGs.
 
-## Non-goals (this version)
+## Planned Features
 
 - IOS-XR, small-business CLI, and Meraki
 - Controller-side CAPWAP provisioning, or talking to a wireless controller (the access point is configured only over its console)
